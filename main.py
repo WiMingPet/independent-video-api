@@ -650,22 +650,22 @@ def get_credits(phone: str, db: Session = Depends(get_db)):
 
 @app.get("/history/{phone}")
 def get_history(phone: str, db: Session = Depends(get_db)):
-    items = db.query(History).filter(History.phone == phone).order_by(History.created_at.desc()).limit(20).all()
-    return {
-        "code": 200,
-        "data": [
-            {
-                "id": h.id, 
-                "video_url": h.video_url, 
-                "type": h.type if h.type else "video",  # 处理旧记录
-                "created_at": str(h.created_at)
-            }
-            for h in items
-        ]
-    }
-        
+    logger.info(f"查询历史记录请求: 手机号={phone}")
+    try:
+        items = db.query(History).filter(History.phone == phone).order_by(History.created_at.desc()).limit(20).all()
+        return {
+            "code": 200,
+            "data": [
+                {
+                    "id": h.id, 
+                    "video_url": h.video_url, 
+                    "type": h.type if h.type else "video",  # 处理旧记录
+                    "created_at": str(h.created_at)
+                }
+                for h in items
+            ]
+        }
     except Exception as e:
-        # 7. 记录异常
         logger.error(f"查询历史记录失败: 手机号={phone}, 错误={str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"查询失败: {str(e)}")
