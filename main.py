@@ -140,6 +140,127 @@ async def generate_video(
 
     raise HTTPException(408, "生成超时")
 
+@app.post("/tryon")
+async def tryon(
+    model_image: UploadFile = File(...),
+    cloth_image: UploadFile = File(...),
+    phone: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    user = get_user_by_phone(db, phone)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+
+    # 扣费
+    cost = 80  # 试穿扣80点，根据你定价改
+    if user.credits < cost:
+        raise HTTPException(403, f"余额不足，需要{cost}点")
+
+    import base64
+    model_data = await model_image.read()
+    cloth_data = await cloth_image.read()
+    model_b64 = base64.b64encode(model_data).decode()
+    cloth_b64 = base64.b64encode(cloth_data).decode()
+
+    headers = {
+        "Authorization": f"Bearer {config.KLING_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model_name": "kling-v3-omni",
+        "prompt": "给模特穿上服装，保持姿势和背景不变，服装细节保持",
+        "image_list": [
+            {"image": f"data:image/jpeg;base64,{model_b64}"},
+            {"image": f"data:image/jpeg;base64,{cloth_b64}"}
+        ],
+        "resolution": "2k",
+        "aspect_ratio": "1:1",
+        "n": 1
+    }
+
+    resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
+    result = resp.json()
+
+    if result.get("code") != 0:
+        raise HTTPException(400, result.get("message"))
+
+    task_id = result["data"]["task_id"]
+
+    # 轮询
+    for _ in range(30):
+        time.sleep(5)
+        status_resp = requests.get(
+            f"{config.KLING_API_URL}/images/omni-image/{task_id}",
+            headers=headers
+        )
+        status_data = status_resp.json()["data"]
+        if status_data["task_status"] == "succeed":
+            image_url = status_data["task_result"]["images"][0]["url"]
+            user.credits -= cost
+            db.commit()
+            return {"code": 200, "image_url": image_url, "credits": user.credits}
+        elif status_data["task_status"] == "failed":
+            raise HTTPException(400, status_data.get("task_status_msg"))
+
+    raise HTTPException(408, "生成超时")
+
+# ========== 图生图接口 ==========
+@app.post("/image/edit")
+async def edit_image(
+    image: UploadFile = File(...),
+    prompt: str = Form(...),
+    phone: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    user = get_user_by_phone(db, phone)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+
+    cost = 20  # 图生图扣20点
+    if user.credits < cost:
+        raise HTTPException(403, f"余额不足，需要{cost}点")
+
+    import base64
+    image_data = await image.read()
+    image_b64 = base64.b64encode(image_data).decode()
+
+    headers = {
+        "Authorization": f"Bearer {config.KLING_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model_name": "kling-v3",
+        "prompt": prompt,
+        "image": f"data:image/jpeg;base64,{image_b64}",
+        "aspect_ratio": "1:1",
+        "n": 1
+    }
+
+    resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=payload, headers=headers)
+    result = resp.json()
+
+    if result.get("code") != 0:
+        raise HTTPException(400, result.get("message"))
+
+    task_id = result["data"]["task_id"]
+
+    for _ in range(30):
+        time.sleep(5)
+        status_resp = requests.get(
+            f"{config.KLING_API_URL}/images/generations/{task_id}",
+            headers=headers
+        )
+        status_data = status_resp.json()["data"]
+        if status_data["task_status"] == "succeed":
+            image_url = status_data["task_result"]["images"][0]["url"]
+            user.credits -= cost
+            db.commit()
+            return {"code": 200, "image_url": image_url, "credits": user.credits}
+        elif status_data["task_status"] == "failed":
+            raise HTTPException(400, status_data.get("task_status_msg"))
+
+    raise HTTPException(408, "生成超时")
+
 # ========== 查询余额 ==========
 @app.get("/credits/{phone}")
 def get_credits(phone: str, db: Session = Depends(get_db)):
