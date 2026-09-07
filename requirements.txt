@@ -1,5 +1,7 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 requests
 python-multipart
+pydantic
+python-dotenv
