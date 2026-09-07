@@ -328,6 +328,28 @@ def get_history(phone: str, db: Session = Depends(get_db)):
         logger.error(f"查询历史记录失败: 手机号={phone}, 错误={str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"查询失败: {str(e)}")
-    except Exception as e:
-        logger.error(f"查询历史记录异常: {str(e)}")
+
+# ========== 删除历史记录 ==========
+@app.delete("/history/delete/{history_id}")
+def delete_history(history_id: int, db: Session = Depends(get_db)):
+    logger.info(f"删除历史记录请求: ID={history_id}")
+    try:
+        history = db.query(History).filter(History.id == history_id).first()
+        if not history:
+            logger.warning(f"删除失败: 记录不存在 ID={history_id}")
+            raise HTTPException(404, "记录不存在")
+        
+        # 记录删除前的信息
+        logger.info(f"准备删除记录 - ID: {history.id}, 手机号: {history.phone}, 视频URL: {history.video_url}")
+        
+        db.delete(history)
+        db.commit()
+        logger.info(f"删除成功: ID={history_id}")
+        return {"code": 200, "message": "删除成功"}
+    except HTTPException:
         raise
+    except Exception as e:
+        logger.error(f"删除历史记录异常: {str(e)}")
+        logger.error(traceback.format_exc())
+        db.rollback()
+        raise HTTPException(500, f"删除失败: {str(e)}")
