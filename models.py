@@ -9,3 +9,10 @@ class User(Base):
     password = Column(String)
     credits = Column(Integer, default=0)
     created_at = Column(DateTime, default=func.now())
+
+class History(Base):
+    __tablename__ = "history"
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String, index=True)
+    video_url = Column(String)
+    created_at = Column(DateTime, default=func.now())

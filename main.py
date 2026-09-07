@@ -6,6 +6,7 @@ import hashlib
 import requests
 import time
 from typing import Optional
+from models import User, History
 
 from database import engine, get_db, Base
 from models import User
@@ -129,6 +130,9 @@ async def generate_video(
             video_url = status_data["task_result"]["videos"][0]["url"]
             # 扣费
             user.credits -= cost
+            # 保存历史记录
+            history = History(phone=phone, video_url=video_url)
+            db.add(history)
             db.commit()
             return {"code": 200, "video_url": video_url, "credits": user.credits}
         elif status_data["task_status"] == "failed":
@@ -143,3 +147,14 @@ def get_credits(phone: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(404, "用户不存在")
     return {"phone": phone, "credits": user.credits}
+
+@app.get("/history/{phone}")
+def get_history(phone: str, db: Session = Depends(get_db)):
+    items = db.query(History).filter(History.phone == phone).order_by(History.created_at.desc()).limit(10).all()
+    return {
+        "code": 200,
+        "data": [
+            {"id": h.id, "video_url": h.video_url, "created_at": str(h.created_at)}
+            for h in items
+        ]
+    }
