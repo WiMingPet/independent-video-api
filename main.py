@@ -515,24 +515,26 @@ async def tryon(
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"服务器错误: {str(e)}")
 
-# ========== 图片编辑接口 ==========
-@app.post("/image/edit")
-async def edit_image(
+# ========== 图片生成接口（支持多张） ==========
+@app.post("/image/generate")
+async def generate_images(
     image: UploadFile = File(...),
-    prompt: str = Form(...),
+    prompt: str = Form(""),
+    num_images: int = Form(1),
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    logger.info(f"图片编辑请求: 手机号={phone}, 提示词={prompt[:50]}")
+    logger.info(f"图片生成请求: 手机号={phone}, 张数={num_images}, 提示词={prompt[:50]}")
     try:
         user = get_user_by_phone(db, phone)
         if not user:
-            logger.error(f"图片编辑失败: 用户不存在 {phone}")
+            logger.error(f"图片生成失败: 用户不存在 {phone}")
             raise HTTPException(404, "用户不存在")
 
-        cost = 10  # 图生图扣10点
+        # 每张图片10点
+        cost = num_images * 10
         if user.credits < cost:
-            logger.warning(f"图片编辑失败: 余额不足 {phone}, 需要{cost}点, 当前{user.credits}点")
+            logger.warning(f"图片生成失败: 余额不足 {phone}, 需要{cost}点, 当前{user.credits}点")
             raise HTTPException(403, f"余额不足，需要{cost}点")
 
         import base64
@@ -547,23 +549,23 @@ async def edit_image(
         
         payload = {
             "model_name": "kling-v3",
-            "prompt": prompt,
+            "prompt": prompt if prompt else "保持原图不变",
             "image": f"data:image/jpeg;base64,{image_b64}",
             "aspect_ratio": "1:1",
-            "n": 1
+            "n": num_images  # 生成张数
         }
 
-        logger.info("开始调用可灵API进行图片编辑")
+        logger.info(f"开始调用可灵API生成{num_images}张图片")
         resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=payload, headers=headers)
         result = resp.json()
-        logger.info(f"可灵图片编辑API响应: code={result.get('code')}, message={result.get('message')}")
+        logger.info(f"可灵图片生成API响应: code={result.get('code')}, message={result.get('message')}")
 
         if result.get("code") != 0:
-            logger.error(f"图片编辑失败: {result.get('message')}")
+            logger.error(f"图片生成失败: {result.get('message')}")
             raise HTTPException(400, result.get("message"))
 
         task_id = result["data"]["task_id"]
-        logger.info(f"图片编辑任务ID: {task_id}")
+        logger.info(f"图片生成任务ID: {task_id}")
 
         # 轮询结果
         for i in range(30):
@@ -573,25 +575,35 @@ async def edit_image(
                 headers=headers
             )
             status_data = status_resp.json()["data"]
-            logger.info(f"图片编辑状态检查 {i+1}/30: {status_data['task_status']}")
+            logger.info(f"图片生成状态检查 {i+1}/30: {status_data['task_status']}")
             
             if status_data["task_status"] == "succeed":
-                image_url = status_data["task_result"]["images"][0]["url"]
+                # 获取所有生成的图片
+                images = status_data["task_result"]["images"]
+                image_urls = [img["url"] for img in images]
+                
+                # 扣费
                 user.credits -= cost
                 db.commit()
-                logger.info(f"图片编辑成功: {phone}, URL={image_url}, 剩余余额={user.credits}")
-                return {"code": 200, "image_url": image_url, "credits": user.credits}
+                
+                logger.info(f"图片生成成功: {phone}, 生成{len(image_urls)}张图片, 剩余余额={user.credits}")
+                return {
+                    "code": 200, 
+                    "images": image_urls, 
+                    "credits": user.credits,
+                    "count": len(image_urls)
+                }
             elif status_data["task_status"] == "failed":
-                logger.error(f"图片编辑失败: {status_data.get('task_status_msg')}")
+                logger.error(f"图片生成失败: {status_data.get('task_status_msg')}")
                 raise HTTPException(400, status_data.get("task_status_msg"))
 
-        logger.error("图片编辑超时")
+        logger.error("图片生成超时")
         raise HTTPException(408, "生成超时")
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"图片编辑异常: {str(e)}")
+        logger.error(f"图片生成异常: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"服务器错误: {str(e)}")
 
