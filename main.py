@@ -281,6 +281,8 @@ async def generate_video_background(
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
+    logger.info(f"后台视频生成请求: 手机号={phone}, 时长={duration}s")
+    
     user = get_user_by_phone(db, phone)
     if not user:
         raise HTTPException(404, "用户不存在")
@@ -309,6 +311,8 @@ async def generate_video_background(
     db.add(task)
     db.commit()
     
+    logger.info(f"后台任务创建成功: {task_id}")
+    
     # 启动后台线程处理
     import threading
     image_data = await image.read()
@@ -330,13 +334,16 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
     from database import SessionLocal
     db = SessionLocal()
     
+    logger.info(f"🎬 后台视频生成开始: 任务ID={task_id}, 手机号={phone}")
+    
     try:
         # 更新任务状态
         task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
         task.status = "processing"
         db.commit()
+        logger.info(f"任务 {task_id}: 状态更新为 processing")
         
-        # 调用可灵API生成视频（这里复制你现有的生成逻辑）
+        # 调用可灵API生成视频
         import base64
         image_b64 = base64.b64encode(image_data).decode()
         
@@ -346,6 +353,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         }
         
         # 图生图
+        logger.info(f"任务 {task_id}: 开始图片处理")
         edit_payload = {
             "model_name": "kling-v3",
             "prompt": prompt if prompt else "保持原图不变",
@@ -369,8 +377,10 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 f"{config.KLING_API_URL}/images/generations/{edit_task_id}",
                 headers=headers
             ).json()["data"]
+            logger.info(f"任务 {task_id}: 图片处理状态 {i+1}/30: {edit_status['task_status']}")
             if edit_status["task_status"] == "succeed":
                 edited_image_url = edit_status["task_result"]["images"][0]["url"]
+                logger.info(f"任务 {task_id}: 图片处理成功")
                 break
             elif edit_status["task_status"] == "failed":
                 raise Exception(edit_status.get("task_status_msg"))
@@ -379,6 +389,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
             raise Exception("图片处理超时")
         
         # 图生视频
+        logger.info(f"任务 {task_id}: 开始视频生成")
         video_payload = {
             "model_name": "kling-v2-6",
             "prompt": prompt if prompt else "让图片动起来",
@@ -402,6 +413,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 f"{config.KLING_API_URL}/videos/image2video/{video_task_id}",
                 headers=headers
             ).json()["data"]
+            logger.info(f"任务 {task_id}: 视频生成状态 {i+1}/60: {video_status['task_status']}")
             if video_status["task_status"] == "succeed":
                 video_url = video_status["task_result"]["videos"][0]["url"]
                 
@@ -413,6 +425,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 task.video_url = video_url
                 task.status = "completed"
                 db.commit()
+                logger.info(f"✅ 后台视频生成成功: {phone}, URL={video_url}")
                 return
             elif video_status["task_status"] == "failed":
                 raise Exception(video_status.get("task_status_msg"))
@@ -420,7 +433,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         raise Exception("视频生成超时")
         
     except Exception as e:
-        # 失败退款
+        logger.error(f"❌ 后台视频生成失败: {task_id}, 错误: {str(e)}")
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
@@ -429,6 +442,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         if user:
             user.credits += cost
             db.commit()
+            logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
     finally:
         db.close()
 
@@ -436,6 +450,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
 # ========== 查询任务状态 ==========
 @app.get("/video/task/{task_id}")
 def get_task_status(task_id: str, db: Session = Depends(get_db)):
+    logger.info(f"查询任务状态: {task_id}")
     task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
     if not task:
         raise HTTPException(404, "任务不存在")
