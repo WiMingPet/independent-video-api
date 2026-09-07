@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -6,8 +6,11 @@ import hashlib
 import requests
 import time
 import logging
+import threading
+import uuid
+import asyncio
 from typing import Optional
-from models import User, History
+from models import User, History, VideoTask
 from database import engine, get_db, Base
 import config
 from logging_config import logger, setup_logging
@@ -251,7 +254,182 @@ async def generate_video(
         logger.error(traceback.format_exc())
         raise
 
-# ========== 其他接口同样添加日志 ==========
+# ========== 后台生成视频接口 ==========
+@app.post("/video/generate/background")
+async def generate_video_background(
+    image: UploadFile = File(...),
+    prompt: str = Form(""),
+    duration: int = Form(5),
+    phone: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    user = get_user_by_phone(db, phone)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    
+    cost = config.VIDEO_COSTS.get(duration, 30)
+    if user.credits < cost:
+        raise HTTPException(403, f"余额不足，需要{cost}点")
+    
+    # 先扣费
+    user.credits -= cost
+    db.commit()
+    
+    # 创建任务ID
+    import uuid
+    task_id = str(uuid.uuid4())
+    
+    # 保存任务信息到数据库
+    task = VideoTask(
+        task_id=task_id,
+        phone=phone,
+        status="pending",
+        prompt=prompt,
+        duration=duration,
+        cost=cost
+    )
+    db.add(task)
+    db.commit()
+    
+    # 启动后台线程处理
+    import threading
+    image_data = await image.read()
+    thread = threading.Thread(
+        target=process_video_in_background,
+        args=(task_id, phone, image_data, prompt, duration, cost)
+    )
+    thread.start()
+    
+    return {
+        "code": 200,
+        "message": "任务已提交，将在后台生成",
+        "task_id": task_id
+    }
+
+
+def process_video_in_background(task_id, phone, image_data, prompt, duration, cost):
+    """后台处理视频生成"""
+    from database import SessionLocal
+    db = SessionLocal()
+    
+    try:
+        # 更新任务状态
+        task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
+        task.status = "processing"
+        db.commit()
+        
+        # 调用可灵API生成视频（这里复制你现有的生成逻辑）
+        import base64
+        image_b64 = base64.b64encode(image_data).decode()
+        
+        headers = {
+            "Authorization": f"Bearer {config.KLING_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # 图生图
+        edit_payload = {
+            "model_name": "kling-v3",
+            "prompt": prompt if prompt else "保持原图不变",
+            "image": f"data:image/jpeg;base64,{image_b64}",
+            "aspect_ratio": "1:1",
+            "n": 1
+        }
+        
+        resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=edit_payload, headers=headers)
+        edit_result = resp.json()
+        
+        if edit_result.get("code") != 0:
+            raise Exception(edit_result.get("message"))
+        
+        edit_task_id = edit_result["data"]["task_id"]
+        edited_image_url = None
+        
+        for i in range(30):
+            time.sleep(5)
+            edit_status = requests.get(
+                f"{config.KLING_API_URL}/images/generations/{edit_task_id}",
+                headers=headers
+            ).json()["data"]
+            if edit_status["task_status"] == "succeed":
+                edited_image_url = edit_status["task_result"]["images"][0]["url"]
+                break
+            elif edit_status["task_status"] == "failed":
+                raise Exception(edit_status.get("task_status_msg"))
+        
+        if not edited_image_url:
+            raise Exception("图片处理超时")
+        
+        # 图生视频
+        video_payload = {
+            "model_name": "kling-v2-6",
+            "prompt": prompt if prompt else "让图片动起来",
+            "duration": str(duration),
+            "mode": "std",
+            "with_audio": True,
+            "image": edited_image_url
+        }
+        
+        resp2 = requests.post(f"{config.KLING_API_URL}/videos/image2video", json=video_payload, headers=headers)
+        video_result = resp2.json()
+        
+        if video_result.get("code") != 0:
+            raise Exception(video_result.get("message"))
+        
+        video_task_id = video_result["data"]["task_id"]
+        
+        for i in range(60):
+            time.sleep(5)
+            video_status = requests.get(
+                f"{config.KLING_API_URL}/videos/image2video/{video_task_id}",
+                headers=headers
+            ).json()["data"]
+            if video_status["task_status"] == "succeed":
+                video_url = video_status["task_result"]["videos"][0]["url"]
+                
+                # 保存到历史记录
+                history = History(phone=phone, video_url=video_url)
+                db.add(history)
+                
+                # 更新任务状态
+                task.video_url = video_url
+                task.status = "completed"
+                db.commit()
+                return
+            elif video_status["task_status"] == "failed":
+                raise Exception(video_status.get("task_status_msg"))
+        
+        raise Exception("视频生成超时")
+        
+    except Exception as e:
+        # 失败退款
+        task.status = "failed"
+        task.error_message = str(e)
+        db.commit()
+        
+        user = get_user_by_phone(db, phone)
+        if user:
+            user.credits += cost
+            db.commit()
+    finally:
+        db.close()
+
+
+# ========== 查询任务状态 ==========
+@app.get("/video/task/{task_id}")
+def get_task_status(task_id: str, db: Session = Depends(get_db)):
+    task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    
+    return {
+        "code": 200,
+        "status": task.status,
+        "video_url": task.video_url,
+        "error_message": task.error_message
+    }
+
+# ========== 虚拟试穿接口 ==========
 @app.post("/tryon")
 async def tryon(
     model_image: UploadFile = File(...),
@@ -266,17 +444,156 @@ async def tryon(
             logger.error(f"虚拟试穿失败: 用户不存在 {phone}")
             raise HTTPException(404, "用户不存在")
 
-        cost = 80
+        cost = 80  # 试穿扣80点
         if user.credits < cost:
-            logger.warning(f"虚拟试穿失败: 余额不足 {phone}, 需要{cost}点")
+            logger.warning(f"虚拟试穿失败: 余额不足 {phone}, 需要{cost}点, 当前{user.credits}点")
             raise HTTPException(403, f"余额不足，需要{cost}点")
 
-        # ... 原有代码 ...
-        logger.info(f"虚拟试穿成功: {phone}")
-        return {"code": 200, "image_url": image_url, "credits": user.credits}
+        import base64
+        model_data = await model_image.read()
+        cloth_data = await cloth_image.read()
+        model_b64 = base64.b64encode(model_data).decode()
+        cloth_b64 = base64.b64encode(cloth_data).decode()
+        logger.info(f"图片读取成功: 模特图={len(model_data)} bytes, 服装图={len(cloth_data)} bytes")
+
+        headers = {
+            "Authorization": f"Bearer {config.KLING_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model_name": "kling-v3-omni",
+            "prompt": "给模特穿上服装，保持姿势和背景不变，服装细节保持",
+            "image_list": [
+                {"image": f"data:image/jpeg;base64,{model_b64}"},
+                {"image": f"data:image/jpeg;base64,{cloth_b64}"}
+            ],
+            "resolution": "2k",
+            "aspect_ratio": "1:1",
+            "n": 1
+        }
+
+        logger.info("开始调用可灵API进行虚拟试穿")
+        resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
+        result = resp.json()
+        logger.info(f"可灵试穿API响应: code={result.get('code')}, message={result.get('message')}")
+
+        if result.get("code") != 0:
+            logger.error(f"虚拟试穿失败: {result.get('message')}")
+            raise HTTPException(400, result.get("message"))
+
+        task_id = result["data"]["task_id"]
+        logger.info(f"虚拟试穿任务ID: {task_id}")
+
+        # 轮询结果
+        for i in range(30):
+            time.sleep(5)
+            status_resp = requests.get(
+                f"{config.KLING_API_URL}/images/omni-image/{task_id}",
+                headers=headers
+            )
+            status_data = status_resp.json()["data"]
+            logger.info(f"虚拟试穿状态检查 {i+1}/30: {status_data['task_status']}")
+            
+            if status_data["task_status"] == "succeed":
+                image_url = status_data["task_result"]["images"][0]["url"]
+                user.credits -= cost
+                db.commit()
+                logger.info(f"虚拟试穿成功: {phone}, URL={image_url}, 剩余余额={user.credits}")
+                return {"code": 200, "image_url": image_url, "credits": user.credits}
+            elif status_data["task_status"] == "failed":
+                logger.error(f"虚拟试穿失败: {status_data.get('task_status_msg')}")
+                raise HTTPException(400, status_data.get("task_status_msg"))
+
+        logger.error("虚拟试穿超时")
+        raise HTTPException(408, "生成超时")
+        
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"虚拟试穿异常: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(500, f"服务器错误: {str(e)}")
+
+# ========== 图片编辑接口 ==========
+@app.post("/image/edit")
+async def edit_image(
+    image: UploadFile = File(...),
+    prompt: str = Form(...),
+    phone: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    logger.info(f"图片编辑请求: 手机号={phone}, 提示词={prompt[:50]}")
+    try:
+        user = get_user_by_phone(db, phone)
+        if not user:
+            logger.error(f"图片编辑失败: 用户不存在 {phone}")
+            raise HTTPException(404, "用户不存在")
+
+        cost = 10  # 图生图扣10点
+        if user.credits < cost:
+            logger.warning(f"图片编辑失败: 余额不足 {phone}, 需要{cost}点, 当前{user.credits}点")
+            raise HTTPException(403, f"余额不足，需要{cost}点")
+
+        import base64
+        image_data = await image.read()
+        image_b64 = base64.b64encode(image_data).decode()
+        logger.info(f"图片读取成功: 大小={len(image_data)} bytes")
+
+        headers = {
+            "Authorization": f"Bearer {config.KLING_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model_name": "kling-v3",
+            "prompt": prompt,
+            "image": f"data:image/jpeg;base64,{image_b64}",
+            "aspect_ratio": "1:1",
+            "n": 1
+        }
+
+        logger.info("开始调用可灵API进行图片编辑")
+        resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=payload, headers=headers)
+        result = resp.json()
+        logger.info(f"可灵图片编辑API响应: code={result.get('code')}, message={result.get('message')}")
+
+        if result.get("code") != 0:
+            logger.error(f"图片编辑失败: {result.get('message')}")
+            raise HTTPException(400, result.get("message"))
+
+        task_id = result["data"]["task_id"]
+        logger.info(f"图片编辑任务ID: {task_id}")
+
+        # 轮询结果
+        for i in range(30):
+            time.sleep(5)
+            status_resp = requests.get(
+                f"{config.KLING_API_URL}/images/generations/{task_id}",
+                headers=headers
+            )
+            status_data = status_resp.json()["data"]
+            logger.info(f"图片编辑状态检查 {i+1}/30: {status_data['task_status']}")
+            
+            if status_data["task_status"] == "succeed":
+                image_url = status_data["task_result"]["images"][0]["url"]
+                user.credits -= cost
+                db.commit()
+                logger.info(f"图片编辑成功: {phone}, URL={image_url}, 剩余余额={user.credits}")
+                return {"code": 200, "image_url": image_url, "credits": user.credits}
+            elif status_data["task_status"] == "failed":
+                logger.error(f"图片编辑失败: {status_data.get('task_status_msg')}")
+                raise HTTPException(400, status_data.get("task_status_msg"))
+
+        logger.error("图片编辑超时")
+        raise HTTPException(408, "生成超时")
+        
+    except HTTPException:
         raise
+    except Exception as e:
+        logger.error(f"图片编辑异常: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(500, f"服务器错误: {str(e)}")
 
 # ... 其他接口类似添加日志 ...
 
