@@ -259,7 +259,14 @@ async def generate_video(
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
                 db.commit()
-                logger.info(f"视频生成成功: {phone}, URL={video_url}, 剩余余额={user.credits}")
+                
+                # ========== 添加详细日志 ==========
+                logger.info(f"✅ 视频生成成功!")
+                logger.info(f"   手机号: {phone}")
+                logger.info(f"   视频URL: {video_url}")
+                logger.info(f"   剩余余额: {user.credits}")
+                # ========== 日志结束 ==========
+                
                 return {"code": 200, "video_url": video_url, "credits": user.credits}
             elif video_status["task_status"] == "failed":
                 logger.error(f"视频生成失败: {video_status.get('task_status_msg')}")
@@ -425,7 +432,14 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 task.video_url = video_url
                 task.status = "completed"
                 db.commit()
-                logger.info(f"✅ 后台视频生成成功: {phone}, URL={video_url}")
+                
+                # ========== 添加详细日志 ==========
+                logger.info(f"✅ 后台视频生成成功!")
+                logger.info(f"   手机号: {phone}")
+                logger.info(f"   视频URL: {video_url}")
+                logger.info(f"   任务ID: {task_id}")
+                # ========== 日志结束 ==========
+                
                 return
             elif video_status["task_status"] == "failed":
                 raise Exception(video_status.get("task_status_msg"))
@@ -625,7 +639,15 @@ async def generate_images(
 
                 db.commit()
                 
-                logger.info(f"图片生成成功: {phone}, 生成{len(image_urls)}张图片, 剩余余额={user.credits}")
+                # ========== 添加详细日志 ==========
+                logger.info(f"✅ 图片生成成功!")
+                logger.info(f"   手机号: {phone}")
+                logger.info(f"   图片数量: {len(image_urls)}")
+                for i, url in enumerate(image_urls):
+                    logger.info(f"   图片{i+1}: {url}")
+                logger.info(f"   剩余余额: {user.credits}")
+                # ========== 日志结束 ==========
+                
                 return {
                     "code": 200, 
                     "images": image_urls, 
@@ -646,7 +668,158 @@ async def generate_images(
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"服务器错误: {str(e)}")
 
-# ... 其他接口类似添加日志 ...
+# ========== 图片后台生成接口 ==========
+@app.post("/image/generate/background")
+async def generate_images_background(
+    image: UploadFile = File(...),
+    prompt: str = Form(""),
+    num_images: int = Form(1),
+    phone: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    logger.info(f"后台图片生成请求: 手机号={phone}, 张数={num_images}")
+    
+    user = get_user_by_phone(db, phone)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    
+    cost = num_images * 10
+    if user.credits < cost:
+        raise HTTPException(403, f"余额不足，需要{cost}点")
+    
+    # 先扣费
+    user.credits -= cost
+    db.commit()
+    
+    # 创建任务ID
+    task_id = str(uuid.uuid4())
+    
+    # 保存任务信息
+    task = VideoTask(
+        task_id=task_id,
+        phone=phone,
+        status="pending",
+        prompt=prompt,
+        cost=cost,
+        video_url=None  # 图片任务
+    )
+    db.add(task)
+    db.commit()
+    
+    # 启动后台线程
+    image_data = await image.read()
+    thread = threading.Thread(
+        target=process_images_in_background,
+        args=(task_id, phone, image_data, prompt, num_images, cost)
+    )
+    thread.start()
+    
+    logger.info(f"后台图片任务创建成功: {task_id}")
+    
+    return {
+        "code": 200,
+        "message": "任务已提交，将在后台生成",
+        "task_id": task_id
+    }
+
+
+def process_images_in_background(task_id, phone, image_data, prompt, num_images, cost):
+    """后台处理图片生成"""
+    from database import SessionLocal
+    db = SessionLocal()
+    
+    logger.info(f"🎨 后台图片生成开始: 任务ID={task_id}, 手机号={phone}, 张数={num_images}")
+    
+    try:
+        # 更新任务状态
+        task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
+        task.status = "processing"
+        db.commit()
+        logger.info(f"任务 {task_id}: 状态更新为 processing")
+        
+        # 调用可灵API
+        import base64
+        image_b64 = base64.b64encode(image_data).decode()
+        logger.info(f"任务 {task_id}: 图片读取成功, 大小={len(image_data)} bytes")
+        
+        headers = {
+            "Authorization": f"Bearer {config.KLING_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model_name": "kling-v3",
+            "prompt": prompt if prompt else "保持原图不变",
+            "image": f"data:image/jpeg;base64,{image_b64}",
+            "aspect_ratio": "1:1",
+            "n": num_images
+        }
+        
+        logger.info(f"任务 {task_id}: 开始调用可灵API生成{num_images}张图片")
+        resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=payload, headers=headers)
+        result = resp.json()
+        logger.info(f"任务 {task_id}: 可灵API响应 code={result.get('code')}, message={result.get('message')}")
+        
+        if result.get("code") != 0:
+            raise Exception(result.get("message"))
+        
+        keling_task_id = result["data"]["task_id"]
+        logger.info(f"任务 {task_id}: 可灵任务ID={keling_task_id}")
+        
+        for i in range(30):
+            time.sleep(5)
+            status_resp = requests.get(
+                f"{config.KLING_API_URL}/images/generations/{keling_task_id}",
+                headers=headers
+            )
+            status_data = status_resp.json()["data"]
+            logger.info(f"任务 {task_id}: 图片生成状态 {i+1}/30: {status_data['task_status']}")
+            
+            if status_data["task_status"] == "succeed":
+                images = status_data["task_result"]["images"]
+                image_urls = [img["url"] for img in images]
+                
+                # 保存到历史记录
+                for image_url in image_urls:
+                    history = History(phone=phone, video_url=image_url, type="image")
+                    db.add(history)
+                
+                # 更新任务状态
+                task.status = "completed"
+                task.video_url = image_urls[0] if image_urls else None
+                db.commit()
+                
+                # ========== 详细成功日志 ==========
+                logger.info(f"✅ 后台图片生成成功!")
+                logger.info(f"   任务ID: {task_id}")
+                logger.info(f"   手机号: {phone}")
+                logger.info(f"   图片数量: {len(image_urls)}")
+                for i, url in enumerate(image_urls):
+                    logger.info(f"   图片{i+1} URL: {url}")
+                logger.info(f"   消耗点数: {cost}")
+                # ========== 日志结束 ==========
+                
+                return
+                
+            elif status_data["task_status"] == "failed":
+                logger.error(f"任务 {task_id}: 图片生成失败: {status_data.get('task_status_msg')}")
+                raise Exception(status_data.get("task_status_msg"))
+        
+        raise Exception("图片生成超时")
+        
+    except Exception as e:
+        logger.error(f"❌ 后台图片生成失败: 任务ID={task_id}, 错误: {str(e)}")
+        task.status = "failed"
+        task.error_message = str(e)
+        db.commit()
+        
+        user = get_user_by_phone(db, phone)
+        if user:
+            user.credits += cost
+            db.commit()
+            logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
+    finally:
+        db.close()
 
 # ========== 查询余额 ==========
 @app.get("/credits/{phone}")
