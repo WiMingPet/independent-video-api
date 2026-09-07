@@ -15,6 +15,12 @@ from database import engine, get_db, Base
 import config
 from logging_config import logger, setup_logging
 import traceback
+import os
+
+# 创建上传目录
+UPLOAD_DIR = "uploads"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
 
 # 初始化日志
 setup_logging()
@@ -176,7 +182,14 @@ async def generate_video(
         import base64
         image_data = await image.read()
         image_b64 = base64.b64encode(image_data).decode()
-        logger.info(f"图片读取成功: 大小={len(image_data)} bytes")
+        
+        # 保存用户上传的图片
+        upload_filename = f"video_{phone}_{uuid.uuid4().hex[:8]}.jpg"
+        upload_path = os.path.join(UPLOAD_DIR, upload_filename)
+        with open(upload_path, "wb") as f:
+            f.write(image_data)
+        
+        logger.info(f"📤 用户上传图片: {phone}, 文件={upload_filename}, 大小={len(image_data)} bytes")
 
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
@@ -268,17 +281,36 @@ async def generate_video(
 
         for i in range(60):
             time.sleep(5)
+            # 使用系统任务ID查询
             status_resp = requests.get(
-                f"https://api-beijing.klingai.com/tasks/{video_task_id}",
+                f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
                 headers=headers
             )
             status_data = status_resp.json()
             logger.info(f"视频生成状态检查 {i+1}/60: {status_data}")
             
-            task_status = status_data.get("data", {}).get("task_status", "")
+            if status_data.get("code") != 0:
+                continue
             
-            if task_status == "succeed":
-                video_url = status_data["data"]["task_result"]["videos"][0]["url"]
+            data_list = status_data.get("data", [])
+            if not data_list:
+                continue
+            
+            task_info = data_list[0]
+            task_status = task_info.get("status", "")
+            
+            if task_status == "succeeded":
+                # 从 outputs 中获取视频URL
+                outputs = task_info.get("outputs", [])
+                video_url = None
+                for output in outputs:
+                    if output.get("type") == "video":
+                        video_url = output.get("url")
+                        break
+                
+                if not video_url:
+                    raise HTTPException(400, "未找到视频URL")
+                
                 user.credits -= cost
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
@@ -290,8 +322,9 @@ async def generate_video(
                 logger.info(f"   剩余余额: {user.credits}")
                 
                 return {"code": 200, "video_url": video_url, "credits": user.credits}
+                
             elif task_status == "failed":
-                error_msg = status_data.get("data", {}).get("task_status_msg", "未知错误")
+                error_msg = task_info.get("message", "未知错误")
                 logger.error(f"视频生成失败: {error_msg}")
                 raise HTTPException(400, error_msg)
 
@@ -380,6 +413,14 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         import base64
         image_b64 = base64.b64encode(image_data).decode()
         
+        # 保存用户上传的图片
+        upload_filename = f"bg_video_{phone}_{task_id[:8]}.jpg"
+        upload_path = os.path.join(UPLOAD_DIR, upload_filename)
+        with open(upload_path, "wb") as f:
+            f.write(image_data)
+        
+        logger.info(f"📤 后台视频上传图片: {phone}, 文件={upload_filename}")
+        
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
             "Content-Type": "application/json"
@@ -464,16 +505,33 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         for i in range(60):
             time.sleep(5)
             status_resp = requests.get(
-                f"https://api-beijing.klingai.com/tasks/{video_task_id}",
+                f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
                 headers=headers
             )
             status_data = status_resp.json()
-            task_status = status_data.get("data", {}).get("task_status", "")
+            logger.info(f"任务 {task_id}: 查询响应: {status_data}")
             
+            if status_data.get("code") != 0:
+                continue
+            
+            data_list = status_data.get("data", [])
+            if not data_list:
+                continue
+            
+            task_info = data_list[0]
+            task_status = task_info.get("status", "")
             logger.info(f"任务 {task_id}: 视频生成状态 {i+1}/60: {task_status}")
             
-            if task_status == "succeed":
-                video_url = status_data["data"]["task_result"]["videos"][0]["url"]
+            if task_status == "succeeded":
+                outputs = task_info.get("outputs", [])
+                video_url = None
+                for output in outputs:
+                    if output.get("type") == "video":
+                        video_url = output.get("url")
+                        break
+                
+                if not video_url:
+                    raise Exception("未找到视频URL")
                 
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
@@ -487,8 +545,9 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 logger.info(f"   视频URL: {video_url}")
                 
                 return
+                
             elif task_status == "failed":
-                error_msg = status_data.get("data", {}).get("task_status_msg", "未知错误")
+                error_msg = task_info.get("message", "未知错误")
                 raise Exception(error_msg)
         
         raise Exception("视频生成超时")
@@ -548,7 +607,17 @@ async def tryon(
         cloth_data = await cloth_image.read()
         model_b64 = base64.b64encode(model_data).decode()
         cloth_b64 = base64.b64encode(cloth_data).decode()
-        logger.info(f"图片读取成功: 模特图={len(model_data)} bytes, 服装图={len(cloth_data)} bytes")
+        
+        # 保存用户上传的图片
+        model_filename = f"tryon_model_{phone}_{uuid.uuid4().hex[:8]}.jpg"
+        cloth_filename = f"tryon_cloth_{phone}_{uuid.uuid4().hex[:8]}.jpg"
+        
+        with open(os.path.join(UPLOAD_DIR, model_filename), "wb") as f:
+            f.write(model_data)
+        with open(os.path.join(UPLOAD_DIR, cloth_filename), "wb") as f:
+            f.write(cloth_data)
+        
+        logger.info(f"📤 试穿上传图片: {phone}, 模特图={model_filename}, 服装图={cloth_filename}")
 
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
@@ -683,6 +752,17 @@ def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
         model_b64 = base64.b64encode(model_data).decode()
         cloth_b64 = base64.b64encode(cloth_data).decode()
         
+        # 保存用户上传的图片
+        model_filename = f"bg_tryon_model_{phone}_{task_id[:8]}.jpg"
+        cloth_filename = f"bg_tryon_cloth_{phone}_{task_id[:8]}.jpg"
+        
+        with open(os.path.join(UPLOAD_DIR, model_filename), "wb") as f:
+            f.write(model_data)
+        with open(os.path.join(UPLOAD_DIR, cloth_filename), "wb") as f:
+            f.write(cloth_data)
+        
+        logger.info(f"📤 后台试穿上传: {phone}, 模特图={model_filename}, 服装图={cloth_filename}")
+        
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
             "Content-Type": "application/json"
@@ -774,16 +854,33 @@ def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
         for i in range(60):
             time.sleep(5)
             status_resp = requests.get(
-                f"https://api-beijing.klingai.com/tasks/{video_task_id}",
+                f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
                 headers=headers
             )
             status_data = status_resp.json()
-            task_status = status_data.get("data", {}).get("task_status", "")
+            logger.info(f"任务 {task_id}: 查询响应: {status_data}")
             
+            if status_data.get("code") != 0:
+                continue
+            
+            data_list = status_data.get("data", [])
+            if not data_list:
+                continue
+            
+            task_info = data_list[0]
+            task_status = task_info.get("status", "")
             logger.info(f"任务 {task_id}: 视频生成状态 {i+1}/60: {task_status}")
             
-            if task_status == "succeed":
-                video_url = status_data["data"]["task_result"]["videos"][0]["url"]
+            if task_status == "succeeded":
+                outputs = task_info.get("outputs", [])
+                video_url = None
+                for output in outputs:
+                    if output.get("type") == "video":
+                        video_url = output.get("url")
+                        break
+                
+                if not video_url:
+                    raise Exception("未找到视频URL")
                 
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
@@ -797,8 +894,9 @@ def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
                 logger.info(f"   视频URL: {video_url}")
                 
                 return
+                
             elif task_status == "failed":
-                error_msg = status_data.get("data", {}).get("task_status_msg", "未知错误")
+                error_msg = task_info.get("message", "未知错误")
                 raise Exception(error_msg)
         
         raise Exception("视频生成超时")
@@ -842,7 +940,14 @@ async def generate_images(
         import base64
         image_data = await image.read()
         image_b64 = base64.b64encode(image_data).decode()
-        logger.info(f"图片读取成功: 大小={len(image_data)} bytes")
+        
+        # 保存用户上传的图片
+        upload_filename = f"image_{phone}_{uuid.uuid4().hex[:8]}.jpg"
+        upload_path = os.path.join(UPLOAD_DIR, upload_filename)
+        with open(upload_path, "wb") as f:
+            f.write(image_data)
+        
+        logger.info(f"📤 图片生成上传: {phone}, 文件={upload_filename}")
 
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
@@ -995,7 +1100,14 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
         # 调用可灵API
         import base64
         image_b64 = base64.b64encode(image_data).decode()
-        logger.info(f"任务 {task_id}: 图片读取成功, 大小={len(image_data)} bytes")
+        
+        # 保存用户上传的图片
+        upload_filename = f"bg_image_{phone}_{task_id[:8]}.jpg"
+        upload_path = os.path.join(UPLOAD_DIR, upload_filename)
+        with open(upload_path, "wb") as f:
+            f.write(image_data)
+        
+        logger.info(f"📤 后台图片生成上传: {phone}, 文件={upload_filename}")
         
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
