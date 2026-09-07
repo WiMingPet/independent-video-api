@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse 
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 import hashlib
@@ -419,7 +420,8 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         with open(upload_path, "wb") as f:
             f.write(image_data)
         
-        logger.info(f"📤 后台视频上传图片: {phone}, 文件={upload_filename}")
+        logger.info(f"📤 后台视频上传图片: {phone}")
+        logger.info(f"   图片URL: https://video-api.lingjing-media.com/uploads/{upload_filename}")
         
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
@@ -617,7 +619,9 @@ async def tryon(
         with open(os.path.join(UPLOAD_DIR, cloth_filename), "wb") as f:
             f.write(cloth_data)
         
-        logger.info(f"📤 试穿上传图片: {phone}, 模特图={model_filename}, 服装图={cloth_filename}")
+        logger.info(f"📤 试穿上传图片: {phone}")
+        logger.info(f"   模特图URL: https://video-api.lingjing-media.com/uploads/{model_filename}")
+        logger.info(f"   服装图URL: https://video-api.lingjing-media.com/uploads/{cloth_filename}")
 
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
@@ -947,7 +951,8 @@ async def generate_images(
         with open(upload_path, "wb") as f:
             f.write(image_data)
         
-        logger.info(f"📤 图片生成上传: {phone}, 文件={upload_filename}")
+        logger.info(f"📤 图片生成上传: {phone}")
+        logger.info(f"   图片URL: https://video-api.lingjing-media.com/uploads/{upload_filename}")
 
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
@@ -1187,6 +1192,16 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
             logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
     finally:
         db.close()
+
+# ========== 查看上传的图片 ==========
+@app.get("/uploads/{filename}")
+def get_uploaded_image(filename: str):
+    """查看用户上传的图片"""
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    else:
+        raise HTTPException(404, "图片不存在")
 
 # ========== 查询余额 ==========
 @app.get("/credits/{phone}")
