@@ -584,7 +584,7 @@ def get_task_status(task_id: str, db: Session = Depends(get_db)):
         "error_message": task.error_message
     }
 
-# ========== 虚拟试穿接口 ==========
+# ========== 虚拟试穿接口（生成视频） ==========
 @app.post("/tryon")
 async def tryon(
     model_image: UploadFile = File(...),
@@ -628,6 +628,8 @@ async def tryon(
             "Content-Type": "application/json"
         }
         
+        # ========== 第一步：生成试穿图片 ==========
+        logger.info("开始调用可灵API生成试穿图片")
         payload = {
             "model_name": "kling-v3-omni",
             "prompt": "给模特穿上服装，保持姿势和背景不变，服装细节保持",
@@ -640,40 +642,133 @@ async def tryon(
             "n": 1
         }
 
-        logger.info("开始调用可灵API进行虚拟试穿")
         resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
         result = resp.json()
         logger.info(f"可灵试穿API响应: code={result.get('code')}, message={result.get('message')}")
 
         if result.get("code") != 0:
-            logger.error(f"虚拟试穿失败: {result.get('message')}")
+            logger.error(f"试穿图片生成失败: {result.get('message')}")
             raise HTTPException(400, result.get("message"))
 
-        task_id = result["data"]["task_id"]
-        logger.info(f"虚拟试穿任务ID: {task_id}")
+        tryon_task_id = result["data"]["task_id"]
+        logger.info(f"试穿图片任务ID: {tryon_task_id}")
+        tryon_image_url = None
 
-        # 轮询结果
+        # 轮询试穿图片结果
         for i in range(30):
             time.sleep(5)
             status_resp = requests.get(
-                f"{config.KLING_API_URL}/images/omni-image/{task_id}",
+                f"{config.KLING_API_URL}/images/omni-image/{tryon_task_id}",
                 headers=headers
             )
             status_data = status_resp.json()["data"]
-            logger.info(f"虚拟试穿状态检查 {i+1}/30: {status_data['task_status']}")
+            logger.info(f"试穿图片生成状态 {i+1}/30: {status_data['task_status']}")
             
             if status_data["task_status"] == "succeed":
-                image_url = status_data["task_result"]["images"][0]["url"]
-                user.credits -= cost
-                db.commit()
-                logger.info(f"虚拟试穿成功: {phone}, URL={image_url}, 剩余余额={user.credits}")
-                return {"code": 200, "image_url": image_url, "credits": user.credits}
+                tryon_image_url = status_data["task_result"]["images"][0]["url"]
+                logger.info("试穿图片生成成功")
+                break
             elif status_data["task_status"] == "failed":
-                logger.error(f"虚拟试穿失败: {status_data.get('task_status_msg')}")
+                logger.error(f"试穿图片生成失败: {status_data.get('task_status_msg')}")
                 raise HTTPException(400, status_data.get("task_status_msg"))
 
-        logger.error("虚拟试穿超时")
-        raise HTTPException(408, "生成超时")
+        if not tryon_image_url:
+            logger.error("试穿图片生成超时")
+            raise HTTPException(408, "试穿图片生成超时")
+
+        # ========== 第二步：图片转视频（可灵3.0） ==========
+        logger.info("开始调用可灵3.0生成试穿视频")
+        
+        video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
+        
+        video_payload = {
+            "contents": [
+                {
+                    "type": "prompt",
+                    "text": "让模特自然展示试穿效果，轻微转动身体"
+                },
+                {
+                    "type": "first_frame",
+                    "url": tryon_image_url
+                }
+            ],
+            "settings": {
+                "resolution": "720p",
+                "duration": 5,
+                "audio": "off",
+                "multi_shot": False
+            },
+            "options": {
+                "callback_url": "",
+                "external_task_id": f"tryon_{phone}_{int(time.time())}",
+                "watermark_info": {
+                    "enabled": False
+                }
+            }
+        }
+
+        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
+        video_result = resp2.json()
+        logger.info(f"可灵3.0视频API响应: {video_result}")
+
+        if video_result.get("code") != 0:
+            logger.error(f"视频生成失败: {video_result.get('message')}")
+            raise HTTPException(400, video_result.get("message"))
+
+        video_task_id = video_result["data"]["id"]
+        logger.info(f"可灵3.0视频任务ID: {video_task_id}")
+
+        # 轮询视频生成结果
+        for i in range(60):
+            time.sleep(5)
+            status_resp = requests.get(
+                f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
+                headers=headers
+            )
+            status_data = status_resp.json()
+            logger.info(f"视频生成状态检查 {i+1}/60: {status_data}")
+            
+            if status_data.get("code") != 0:
+                continue
+            
+            data_list = status_data.get("data", [])
+            if not data_list:
+                continue
+            
+            task_info = data_list[0]
+            task_status = task_info.get("status", "")
+            
+            if task_status == "succeeded":
+                outputs = task_info.get("outputs", [])
+                video_url = None
+                for output in outputs:
+                    if output.get("type") == "video":
+                        video_url = output.get("url")
+                        break
+                
+                if not video_url:
+                    raise HTTPException(400, "未找到视频URL")
+                
+                user.credits -= cost
+                history = History(phone=phone, video_url=video_url, type="video")
+                db.add(history)
+                db.commit()
+                
+                logger.info(f"✅ 虚拟试穿成功!")
+                logger.info(f"   手机号: {phone}")
+                logger.info(f"   试穿图片: {tryon_image_url}")
+                logger.info(f"   视频URL: {video_url}")
+                logger.info(f"   剩余余额: {user.credits}")
+                
+                return {"code": 200, "video_url": video_url, "credits": user.credits}
+                
+            elif task_status == "failed":
+                error_msg = task_info.get("message", "未知错误")
+                logger.error(f"视频生成失败: {error_msg}")
+                raise HTTPException(400, error_msg)
+
+        logger.error("视频生成超时")
+        raise HTTPException(408, "视频生成超时")
         
     except HTTPException:
         raise
