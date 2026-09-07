@@ -87,58 +87,87 @@ async def generate_video(
     if not user:
         raise HTTPException(404, "用户不存在")
 
-    cost = config.VIDEO_COSTS.get(duration, 50)
+    cost = config.VIDEO_COSTS.get(duration, 30)
     if user.credits < cost:
         raise HTTPException(403, f"余额不足，需要{cost}点")
 
-    # 上传图片到可灵（这里简化：直接传base64）
-    image_data = await image.read()
     import base64
-    image_base64 = base64.b64encode(image_data).decode()
+    image_data = await image.read()
+    image_b64 = base64.b64encode(image_data).decode()
 
-    # 调可灵API
     headers = {
         "Authorization": f"Bearer {config.KLING_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {
+
+    # ========== 第一步：图生图修改内容 ==========
+    edit_payload = {
+        "model_name": "kling-v3",
+        "prompt": prompt if prompt else "保持原图不变",
+        "image": f"data:image/jpeg;base64,{image_b64}",
+        "aspect_ratio": "1:1",
+        "n": 1
+    }
+
+    resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=edit_payload, headers=headers)
+    edit_result = resp.json()
+
+    if edit_result.get("code") != 0:
+        raise HTTPException(400, edit_result.get("message"))
+
+    edit_task_id = edit_result["data"]["task_id"]
+    edited_image_url = None
+
+    for _ in range(30):
+        time.sleep(5)
+        edit_status = requests.get(
+            f"{config.KLING_API_URL}/images/generations/{edit_task_id}",
+            headers=headers
+        ).json()["data"]
+        if edit_status["task_status"] == "succeed":
+            edited_image_url = edit_status["task_result"]["images"][0]["url"]
+            break
+        elif edit_status["task_status"] == "failed":
+            raise HTTPException(400, edit_status.get("task_status_msg"))
+
+    if not edited_image_url:
+        raise HTTPException(408, "图片处理超时")
+
+    # ========== 第二步：图生视频 ==========
+    video_payload = {
         "model_name": "kling-v2-6",
-        "prompt": prompt or "让图片动起来",
+        "prompt": prompt if prompt else "让图片动起来",
         "duration": str(duration),
         "mode": "std",
         "with_audio": True,
-        "image": f"data:image/jpeg;base64,{image_base64}"
+        "image": edited_image_url
     }
 
-    resp = requests.post(f"{config.KLING_API_URL}/videos/image2video", json=payload, headers=headers)
-    result = resp.json()
+    resp2 = requests.post(f"{config.KLING_API_URL}/videos/image2video", json=video_payload, headers=headers)
+    video_result = resp2.json()
 
-    if result.get("code") != 0:
-        raise HTTPException(400, result.get("message"))
+    if video_result.get("code") != 0:
+        raise HTTPException(400, video_result.get("message"))
 
-    task_id = result["data"]["task_id"]
+    video_task_id = video_result["data"]["task_id"]
 
-    # 轮询等待结果
-    for _ in range(30):
+    for _ in range(60):
         time.sleep(5)
-        status_resp = requests.get(
-            f"{config.KLING_API_URL}/videos/image2video/{task_id}",
+        video_status = requests.get(
+            f"{config.KLING_API_URL}/videos/image2video/{video_task_id}",
             headers=headers
-        )
-        status_data = status_resp.json()["data"]
-        if status_data["task_status"] == "succeed":
-            video_url = status_data["task_result"]["videos"][0]["url"]
-            # 扣费
+        ).json()["data"]
+        if video_status["task_status"] == "succeed":
+            video_url = video_status["task_result"]["videos"][0]["url"]
             user.credits -= cost
-            # 保存历史记录
             history = History(phone=phone, video_url=video_url)
             db.add(history)
             db.commit()
             return {"code": 200, "video_url": video_url, "credits": user.credits}
-        elif status_data["task_status"] == "failed":
-            raise HTTPException(400, status_data.get("task_status_msg"))
+        elif video_status["task_status"] == "failed":
+            raise HTTPException(400, video_status.get("task_status_msg"))
 
-    raise HTTPException(408, "生成超时")
+    raise HTTPException(408, "视频生成超时")
 
 @app.post("/tryon")
 async def tryon(
