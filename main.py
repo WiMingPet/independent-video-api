@@ -224,60 +224,79 @@ async def generate_video(
             logger.error("图片处理超时")
             raise HTTPException(408, "图片处理超时")
 
-        # ========== 第二步：图生视频 ==========
-        logger.info("开始调用可灵API生成视频")
+        # ========== 第二步：图生视频（可灵3.0） ==========
+        logger.info("开始调用可灵3.0生成视频")
+        
+        video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
+        
         video_payload = {
-            "model_name": "kling-v2-6",
-            "prompt": prompt if prompt else "让图片动起来",
-            "duration": str(duration),
-            "mode": "std",
-            "with_audio": True,
-            "image": edited_image_url
+            "contents": [
+                {
+                    "type": "prompt",
+                    "text": prompt if prompt else "让图片动起来"
+                },
+                {
+                    "type": "first_frame",
+                    "url": edited_image_url
+                }
+            ],
+            "settings": {
+                "resolution": "720",
+                "duration": duration,
+                "audio": "off",
+                "multi_shot": False
+            },
+            "options": {
+                "callback_url": "",
+                "external_task_id": "",
+                "watermark_info": {
+                    "enabled": False
+                }
+            }
         }
 
-        resp2 = requests.post(f"{config.KLING_API_URL}/videos/image2video", json=video_payload, headers=headers)
+        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
         video_result = resp2.json()
-        logger.info(f"可灵视频API响应: code={video_result.get('code')}, message={video_result.get('message')}")
+        logger.info(f"可灵3.0视频API响应: {video_result}")
 
         if video_result.get("code") != 0:
             logger.error(f"视频生成失败: {video_result.get('message')}")
             raise HTTPException(400, video_result.get("message"))
 
         video_task_id = video_result["data"]["task_id"]
-        logger.info(f"视频生成任务ID: {video_task_id}")
+        logger.info(f"可灵3.0视频任务ID: {video_task_id}")
 
         for i in range(60):
             time.sleep(5)
-            video_status = requests.get(
-                f"{config.KLING_API_URL}/videos/image2video/{video_task_id}",
+            status_resp = requests.get(
+                f"https://api-beijing.klingai.com/tasks/{video_task_id}",
                 headers=headers
-            ).json()["data"]
-            logger.info(f"视频生成状态检查 {i+1}/60: {video_status['task_status']}")
-            if video_status["task_status"] == "succeed":
-                video_url = video_status["task_result"]["videos"][0]["url"]
+            )
+            status_data = status_resp.json()
+            logger.info(f"视频生成状态检查 {i+1}/60: {status_data}")
+            
+            task_status = status_data.get("data", {}).get("task_status", "")
+            
+            if task_status == "succeed":
+                video_url = status_data["data"]["task_result"]["videos"][0]["url"]
                 user.credits -= cost
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
                 db.commit()
                 
-                # ========== 添加详细日志 ==========
                 logger.info(f"✅ 视频生成成功!")
                 logger.info(f"   手机号: {phone}")
                 logger.info(f"   视频URL: {video_url}")
                 logger.info(f"   剩余余额: {user.credits}")
-                # ========== 日志结束 ==========
                 
                 return {"code": 200, "video_url": video_url, "credits": user.credits}
-            elif video_status["task_status"] == "failed":
-                logger.error(f"视频生成失败: {video_status.get('task_status_msg')}")
-                raise HTTPException(400, video_status.get("task_status_msg"))
+            elif task_status == "failed":
+                error_msg = status_data.get("data", {}).get("task_status_msg", "未知错误")
+                logger.error(f"视频生成失败: {error_msg}")
+                raise HTTPException(400, error_msg)
 
         logger.error("视频生成超时")
         raise HTTPException(408, "视频生成超时")
-    except Exception as e:
-        logger.error(f"视频生成异常: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
 
 # ========== 后台生成视频接口 ==========
 @app.post("/video/generate/background")
@@ -395,19 +414,40 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         if not edited_image_url:
             raise Exception("图片处理超时")
         
-        # 图生视频
-        logger.info(f"任务 {task_id}: 开始视频生成")
+        # 图生视频（可灵3.0）
+        logger.info(f"任务 {task_id}: 开始调用可灵3.0生成视频")
+        
+        video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
+        
         video_payload = {
-            "model_name": "kling-v2-6",
-            "prompt": prompt if prompt else "让图片动起来",
-            "duration": str(duration),
-            "mode": "std",
-            "with_audio": True,
-            "image": edited_image_url
+            "contents": [
+                {
+                    "type": "prompt",
+                    "text": prompt if prompt else "让图片动起来"
+                },
+                {
+                    "type": "first_frame",
+                    "url": edited_image_url
+                }
+            ],
+            "settings": {
+                "resolution": "720p",
+                "duration": duration,
+                "audio": "off",
+                "multi_shot": False
+            },
+            "options": {
+                "callback_url": "",
+                "external_task_id": task_id,
+                "watermark_info": {
+                    "enabled": False
+                }
+            }
         }
         
-        resp2 = requests.post(f"{config.KLING_API_URL}/videos/image2video", json=video_payload, headers=headers)
+        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
         video_result = resp2.json()
+        logger.info(f"任务 {task_id}: 可灵3.0响应: {video_result}")
         
         if video_result.get("code") != 0:
             raise Exception(video_result.get("message"))
@@ -416,33 +456,33 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         
         for i in range(60):
             time.sleep(5)
-            video_status = requests.get(
-                f"{config.KLING_API_URL}/videos/image2video/{video_task_id}",
+            status_resp = requests.get(
+                f"https://api-beijing.klingai.com/tasks/{video_task_id}",
                 headers=headers
-            ).json()["data"]
-            logger.info(f"任务 {task_id}: 视频生成状态 {i+1}/60: {video_status['task_status']}")
-            if video_status["task_status"] == "succeed":
-                video_url = video_status["task_result"]["videos"][0]["url"]
+            )
+            status_data = status_resp.json()
+            task_status = status_data.get("data", {}).get("task_status", "")
+            
+            logger.info(f"任务 {task_id}: 视频生成状态 {i+1}/60: {task_status}")
+            
+            if task_status == "succeed":
+                video_url = status_data["data"]["task_result"]["videos"][0]["url"]
                 
-                # 保存到历史记录
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
                 
-                # 更新任务状态
                 task.video_url = video_url
                 task.status = "completed"
                 db.commit()
                 
-                # ========== 添加详细日志 ==========
                 logger.info(f"✅ 后台视频生成成功!")
                 logger.info(f"   手机号: {phone}")
                 logger.info(f"   视频URL: {video_url}")
-                logger.info(f"   任务ID: {task_id}")
-                # ========== 日志结束 ==========
                 
                 return
-            elif video_status["task_status"] == "failed":
-                raise Exception(video_status.get("task_status_msg"))
+            elif task_status == "failed":
+                error_msg = status_data.get("data", {}).get("task_status_msg", "未知错误")
+                raise Exception(error_msg)
         
         raise Exception("视频生成超时")
         
@@ -561,6 +601,214 @@ async def tryon(
         logger.error(f"虚拟试穿异常: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"服务器错误: {str(e)}")
+
+# ========== 虚拟试穿后台生成接口（生成视频） ==========
+@app.post("/tryon/background")
+async def tryon_background(
+    model_image: UploadFile = File(...),
+    cloth_image: UploadFile = File(...),
+    phone: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    logger.info(f"后台虚拟试穿请求: 手机号={phone}")
+    
+    user = get_user_by_phone(db, phone)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    
+    cost = 80  # 试穿扣80点
+    if user.credits < cost:
+        raise HTTPException(403, f"余额不足，需要{cost}点")
+    
+    # 先扣费
+    user.credits -= cost
+    db.commit()
+    
+    # 创建任务ID
+    task_id = str(uuid.uuid4())
+    
+    # 保存任务信息
+    task = VideoTask(
+        task_id=task_id,
+        phone=phone,
+        status="pending",
+        prompt="虚拟试穿",
+        cost=cost
+    )
+    db.add(task)
+    db.commit()
+    
+    # 读取图片数据
+    model_data = await model_image.read()
+    cloth_data = await cloth_image.read()
+    
+    # 启动后台线程
+    thread = threading.Thread(
+        target=process_tryon_in_background,
+        args=(task_id, phone, model_data, cloth_data, cost)
+    )
+    thread.start()
+    
+    logger.info(f"后台试穿任务创建成功: {task_id}")
+    
+    return {
+        "code": 200,
+        "message": "任务已提交，将在后台生成",
+        "task_id": task_id
+    }
+
+
+def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
+    """后台处理虚拟试穿，生成视频"""
+    from database import SessionLocal
+    db = SessionLocal()
+    
+    logger.info(f"🎬 后台虚拟试穿开始: 任务ID={task_id}, 手机号={phone}")
+    
+    try:
+        # 更新任务状态
+        task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
+        task.status = "processing"
+        db.commit()
+        logger.info(f"任务 {task_id}: 状态更新为 processing")
+        
+        import base64
+        model_b64 = base64.b64encode(model_data).decode()
+        cloth_b64 = base64.b64encode(cloth_data).decode()
+        
+        headers = {
+            "Authorization": f"Bearer {config.KLING_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # ========== 第一步：生成试穿图片 ==========
+        logger.info(f"任务 {task_id}: 开始生成试穿图片")
+        payload = {
+            "model_name": "kling-v3-omni",
+            "prompt": "给模特穿上服装，保持姿势和背景不变，服装细节保持",
+            "image_list": [
+                {"image": f"data:image/jpeg;base64,{model_b64}"},
+                {"image": f"data:image/jpeg;base64,{cloth_b64}"}
+            ],
+            "resolution": "2k",
+            "aspect_ratio": "1:1",
+            "n": 1
+        }
+        
+        resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
+        result = resp.json()
+        logger.info(f"任务 {task_id}: 试穿图片API响应 code={result.get('code')}")
+        
+        if result.get("code") != 0:
+            raise Exception(result.get("message"))
+        
+        tryon_task_id = result["data"]["task_id"]
+        tryon_image_url = None
+        
+        for i in range(30):
+            time.sleep(5)
+            status_resp = requests.get(
+                f"{config.KLING_API_URL}/images/omni-image/{tryon_task_id}",
+                headers=headers
+            )
+            status_data = status_resp.json()["data"]
+            logger.info(f"任务 {task_id}: 试穿图片生成状态 {i+1}/30: {status_data['task_status']}")
+            
+            if status_data["task_status"] == "succeed":
+                tryon_image_url = status_data["task_result"]["images"][0]["url"]
+                logger.info(f"任务 {task_id}: 试穿图片生成成功")
+                break
+            elif status_data["task_status"] == "failed":
+                raise Exception(status_data.get("task_status_msg"))
+        
+        if not tryon_image_url:
+            raise Exception("试穿图片生成超时")
+        
+        # 图片转视频（可灵3.0）
+        logger.info(f"任务 {task_id}: 开始调用可灵3.0生成视频")
+        
+        video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
+        
+        video_payload = {
+            "contents": [
+                {
+                    "type": "prompt",
+                    "text": "让模特自然展示试穿效果，轻微转动身体"
+                },
+                {
+                    "type": "first_frame",
+                    "url": tryon_image_url
+                }
+            ],
+            "settings": {
+                "resolution": "720p",
+                "duration": 5,
+                "audio": "off",
+                "multi_shot": False
+            },
+            "options": {
+                "callback_url": "",
+                "external_task_id": task_id,
+                "watermark_info": {
+                    "enabled": False
+                }
+            }
+        }
+        
+        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
+        video_result = resp2.json()
+        logger.info(f"任务 {task_id}: 可灵3.0响应: {video_result}")
+        
+        if video_result.get("code") != 0:
+            raise Exception(video_result.get("message"))
+        
+        video_task_id = video_result["data"]["task_id"]
+        
+        for i in range(60):
+            time.sleep(5)
+            status_resp = requests.get(
+                f"https://api-beijing.klingai.com/tasks/{video_task_id}",
+                headers=headers
+            )
+            status_data = status_resp.json()
+            task_status = status_data.get("data", {}).get("task_status", "")
+            
+            logger.info(f"任务 {task_id}: 视频生成状态 {i+1}/60: {task_status}")
+            
+            if task_status == "succeed":
+                video_url = status_data["data"]["task_result"]["videos"][0]["url"]
+                
+                history = History(phone=phone, video_url=video_url, type="video")
+                db.add(history)
+                
+                task.video_url = video_url
+                task.status = "completed"
+                db.commit()
+                
+                logger.info(f"✅ 后台虚拟试穿成功!")
+                logger.info(f"   手机号: {phone}")
+                logger.info(f"   视频URL: {video_url}")
+                
+                return
+            elif task_status == "failed":
+                error_msg = status_data.get("data", {}).get("task_status_msg", "未知错误")
+                raise Exception(error_msg)
+        
+        raise Exception("视频生成超时")
+        
+    except Exception as e:
+        logger.error(f"❌ 后台虚拟试穿失败: 任务ID={task_id}, 错误: {str(e)}")
+        task.status = "failed"
+        task.error_message = str(e)
+        db.commit()
+        
+        user = get_user_by_phone(db, phone)
+        if user:
+            user.credits += cost
+            db.commit()
+            logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
+    finally:
+        db.close()
 
 # ========== 图片生成接口（支持多张） ==========
 @app.post("/image/generate")
