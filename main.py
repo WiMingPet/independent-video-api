@@ -56,6 +56,24 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 
+# ========== 数据库迁移 ==========
+from sqlalchemy import text
+
+try:
+    with engine.connect() as conn:
+        # 检查 history 表是否有 type 字段
+        result = conn.execute(text("PRAGMA table_info(history)"))
+        columns = [row[1] for row in result]
+        if 'type' not in columns:
+            conn.execute(text("ALTER TABLE history ADD COLUMN type VARCHAR DEFAULT 'video'"))
+            conn.commit()
+            print("✅ 添加 type 字段成功")
+        else:
+            print("✅ type 字段已存在")
+except Exception as e:
+    print(f"数据库迁移: {e}")
+# ========== 迁移结束 ==========
+
 # ========== 数据模型 ==========
 class LoginRequest(BaseModel):
     phone: str
@@ -238,7 +256,7 @@ async def generate_video(
             if video_status["task_status"] == "succeed":
                 video_url = video_status["task_result"]["videos"][0]["url"]
                 user.credits -= cost
-                history = History(phone=phone, video_url=video_url)
+                history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
                 db.commit()
                 logger.info(f"视频生成成功: {phone}, URL={video_url}, 剩余余额={user.credits}")
@@ -388,7 +406,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 video_url = video_status["task_result"]["videos"][0]["url"]
                 
                 # 保存到历史记录
-                history = History(phone=phone, video_url=video_url)
+                history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
                 
                 # 更新任务状态
@@ -584,6 +602,12 @@ async def generate_images(
                 
                 # 扣费
                 user.credits -= cost
+
+                # 保存到历史记录
+                for image_url in image_urls:
+                    history = History(phone=phone, video_url=image_url, type="image")
+                    db.add(history)
+
                 db.commit()
                 
                 logger.info(f"图片生成成功: {phone}, 生成{len(image_urls)}张图片, 剩余余额={user.credits}")
@@ -626,31 +650,19 @@ def get_credits(phone: str, db: Session = Depends(get_db)):
 
 @app.get("/history/{phone}")
 def get_history(phone: str, db: Session = Depends(get_db)):
-    # 1. 在函数开始处添加日志 - 记录请求开始
-    logger.info(f"查询历史记录请求: 手机号={phone}")
-    
-    try:
-        # 2. 查询数据库
-        items = db.query(History).filter(History.phone == phone).order_by(History.created_at.desc()).limit(10).all()
-        
-        # 3. 记录查询结果数量
-        logger.info(f"查询到 {len(items)} 条历史记录")
-        
-        # 4. 可选：记录每条记录的详细信息
-        for item in items:
-            logger.info(f"历史记录详情 - ID: {item.id}, 视频URL: {item.video_url}, 创建时间: {item.created_at}")
-        
-        # 5. 记录查询成功
-        logger.info(f"历史记录查询成功: 手机号={phone}, 记录数={len(items)}")
-        
-        # 6. 返回结果
-        return {
-            "code": 200,
-            "data": [
-                {"id": h.id, "video_url": h.video_url, "created_at": str(h.created_at)}
-                for h in items
-            ]
-        }
+    items = db.query(History).filter(History.phone == phone).order_by(History.created_at.desc()).limit(20).all()
+    return {
+        "code": 200,
+        "data": [
+            {
+                "id": h.id, 
+                "video_url": h.video_url, 
+                "type": h.type if h.type else "video",  # 处理旧记录
+                "created_at": str(h.created_at)
+            }
+            for h in items
+        ]
+    }
         
     except Exception as e:
         # 7. 记录异常

@@ -15,6 +15,7 @@ class History(Base):
     id = Column(Integer, primary_key=True, index=True)
     phone = Column(String, index=True)
     video_url = Column(String)
+    type = Column(String, default="video")  # video 或 image
     created_at = Column(DateTime, default=func.now())
 
 class VideoTask(Base):
