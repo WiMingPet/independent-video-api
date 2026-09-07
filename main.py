@@ -297,6 +297,13 @@ async def generate_video(
 
         logger.error("视频生成超时")
         raise HTTPException(408, "视频生成超时")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"视频生成异常: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(500, f"服务器错误: {str(e)}")
 
 # ========== 后台生成视频接口 ==========
 @app.post("/video/generate/background")
