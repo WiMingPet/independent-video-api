@@ -263,7 +263,7 @@ async def generate_video(
             logger.error(f"视频生成失败: {video_result.get('message')}")
             raise HTTPException(400, video_result.get("message"))
 
-        video_task_id = video_result["data"]["task_id"]
+        video_task_id = video_result["data"]["id"]
         logger.info(f"可灵3.0视频任务ID: {video_task_id}")
 
         for i in range(60):
@@ -459,7 +459,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
         if video_result.get("code") != 0:
             raise Exception(video_result.get("message"))
         
-        video_task_id = video_result["data"]["task_id"]
+        video_task_id = video_result["data"]["id"]
         
         for i in range(60):
             time.sleep(5)
@@ -769,7 +769,7 @@ def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
         if video_result.get("code") != 0:
             raise Exception(video_result.get("message"))
         
-        video_task_id = video_result["data"]["task_id"]
+        video_task_id = video_result["data"]["id"]
         
         for i in range(60):
             time.sleep(5)
