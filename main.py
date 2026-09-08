@@ -172,7 +172,7 @@ async def generate_video(
     db: Session = Depends(get_db)
 ):
     # 根据音频选项计算费用
-    if audio == "on":
+    if audio == "native":
         cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
     else:
         cost = config.VIDEO_COSTS.get(duration, 50)
@@ -296,7 +296,7 @@ async def generate_video_background(
     db: Session = Depends(get_db)
 ):
     # 根据音频选项计算费用
-    if audio == "on":
+    if audio == "native":
         cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
     else:
         cost = config.VIDEO_COSTS.get(duration, 50)
