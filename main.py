@@ -1468,9 +1468,11 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
     # ========== 处理套餐订单 ==========
     if out_trade_no.startswith("SUB_"):
         parts = out_trade_no.split("_")
-        if len(parts) >= 3:
+        # 格式: SUB_手机号_plan_500_a_时间戳
+        if len(parts) >= 5:
             sub_phone = parts[1]
-            plan = parts[2]
+            plan = parts[2] + "_" + parts[3] + "_" + parts[4]
+            logger.info(f"套餐订单解析: 手机号={sub_phone}, 套餐={plan}")
             
             if plan in SUBSCRIPTION_PLANS:
                 plan_info = SUBSCRIPTION_PLANS[plan]
