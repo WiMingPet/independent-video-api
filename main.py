@@ -1577,6 +1577,53 @@ async def query_alipay_order(order_id: str, db: Session = Depends(get_db)):
         "status": trade_status
     }
 
+# ========== 管理员开通套餐接口 ==========
+@app.post("/admin/add_subscription")
+def admin_add_subscription(
+    phone: str = Form(...),
+    plan: str = Form(...),
+    admin_key: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """管理员手动开通套餐"""
+    if admin_key != config.ADMIN_KEY:
+        raise HTTPException(403, "管理员密钥错误")
+    
+    if plan not in SUBSCRIPTION_PLANS:
+        raise HTTPException(400, "无效的套餐")
+    
+    plan_info = SUBSCRIPTION_PLANS[plan]
+    sub = get_active_subscription(db, phone)
+    
+    if sub:
+        sub.plan_name = plan
+        sub.video_silent_limit = plan_info["video_silent"]
+        sub.video_audio_limit = plan_info["video_audio"]
+        sub.image_limit = plan_info["images"]
+        sub.video_silent_used = 0
+        sub.video_audio_used = 0
+        sub.image_used = 0
+        sub.end_date = datetime.utcnow() + timedelta(days=30)
+    else:
+        sub = Subscription(
+            phone=phone,
+            plan_name=plan,
+            video_silent_limit=plan_info["video_silent"],
+            video_audio_limit=plan_info["video_audio"],
+            image_limit=plan_info["images"],
+            start_date=datetime.utcnow(),
+            end_date=datetime.utcnow() + timedelta(days=30)
+        )
+        db.add(sub)
+    
+    db.commit()
+    logger.info(f"✅ 管理员开通套餐: {phone}, 套餐: {plan}")
+    return {"code": 200, "message": "套餐开通成功"}
+
+# ========== 查询余额 ==========
+@app.get("/credits/{phone}")
+def get_credits(phone: str, db: Session = Depends(get_db)):
+
 # ========== 查询套餐信息 ==========
 @app.get("/subscription/{phone}")
 def get_subscription_info(phone: str, db: Session = Depends(get_db)):
