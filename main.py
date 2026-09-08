@@ -1620,9 +1620,6 @@ def admin_add_subscription(
     logger.info(f"✅ 管理员开通套餐: {phone}, 套餐: {plan}")
     return {"code": 200, "message": "套餐开通成功"}
 
-# ========== 查询余额 ==========
-@app.get("/credits/{phone}")
-def get_credits(phone: str, db: Session = Depends(get_db)):
 
 # ========== 查询套餐信息 ==========
 @app.get("/subscription/{phone}")
