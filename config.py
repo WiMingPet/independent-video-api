@@ -10,8 +10,11 @@ ADMIN_KEY = os.getenv("ADMIN_KEY", "独立后端默认密钥")
 # 数据库
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./video_users.db")
 
-# 视频扣费
+# 视频扣费（无声）
 VIDEO_COSTS = {5: 50, 10: 100, 15: 150}
+
+# 视频扣费（有声）
+VIDEO_COSTS_AUDIO = {5: 70, 10: 130, 15: 160}
 
 # 支付宝配置
 ALIPAY_APP_ID = os.getenv("ALIPAY_APP_ID", "你的APP_ID")

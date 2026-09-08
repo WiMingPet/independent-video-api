@@ -167,81 +167,43 @@ async def generate_video(
     image: UploadFile = File(...),
     prompt: str = Form(""),
     duration: int = Form(5),
+    audio: str = Form("off"),
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    logger.info(f"视频生成请求: 手机号={phone}, 时长={duration}s, 提示词={prompt[:50]}")
+    # 根据音频选项计算费用
+    if audio == "on":
+        cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
+    else:
+        cost = config.VIDEO_COSTS.get(duration, 50)
+    
+    logger.info(f"视频生成请求: 手机号={phone}, 时长={duration}s, 音频={audio}, 提示词={prompt[:50]}")
     try:
         user = get_user_by_phone(db, phone)
         if not user:
-            logger.error(f"视频生成失败: 用户不存在 {phone}")
             raise HTTPException(404, "用户不存在")
 
-        cost = config.VIDEO_COSTS.get(duration, 30)
         if user.credits < cost:
-            logger.warning(f"视频生成失败: 余额不足 {phone}, 需要{cost}点, 当前{user.credits}点")
             raise HTTPException(403, f"余额不足，需要{cost}点")
 
         import base64
         image_data = await image.read()
         image_b64 = base64.b64encode(image_data).decode()
         
-        # 保存用户上传的图片
         upload_filename = f"video_{phone}_{uuid.uuid4().hex[:8]}.jpg"
         upload_path = os.path.join(UPLOAD_DIR, upload_filename)
         with open(upload_path, "wb") as f:
             f.write(image_data)
         
-        logger.info(f"📤 用户上传图片: {phone}, 文件={upload_filename}, 大小={len(image_data)} bytes")
+        logger.info(f"📤 用户上传图片: {phone}")
+        logger.info(f"   图片URL: https://video-api.lingjing-media.com/uploads/{upload_filename}")
 
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
             "Content-Type": "application/json"
         }
 
-        # ========== 第一步：图生图修改内容 ==========
-        logger.info("开始调用可灵API进行图片处理")
-        edit_payload = {
-            "model_name": "kling-v3",
-            "prompt": prompt if prompt else "保持原图不变",
-            "image": f"data:image/jpeg;base64,{image_b64}",
-            "aspect_ratio": "1:1",
-            "n": 1
-        }
-
-        resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=edit_payload, headers=headers)
-        edit_result = resp.json()
-        logger.info(f"可灵图片API响应: code={edit_result.get('code')}, message={edit_result.get('message')}")
-
-        if edit_result.get("code") != 0:
-            logger.error(f"图片处理失败: {edit_result.get('message')}")
-            raise HTTPException(400, edit_result.get("message"))
-
-        edit_task_id = edit_result["data"]["task_id"]
-        logger.info(f"图片处理任务ID: {edit_task_id}")
-        edited_image_url = None
-
-        for i in range(30):
-            time.sleep(5)
-            edit_status = requests.get(
-                f"{config.KLING_API_URL}/images/generations/{edit_task_id}",
-                headers=headers
-            ).json()["data"]
-            logger.info(f"图片处理状态检查 {i+1}/30: {edit_status['task_status']}")
-            if edit_status["task_status"] == "succeed":
-                edited_image_url = edit_status["task_result"]["images"][0]["url"]
-                logger.info("图片处理成功")
-                break
-            elif edit_status["task_status"] == "failed":
-                logger.error(f"图片处理失败: {edit_status.get('task_status_msg')}")
-                raise HTTPException(400, edit_status.get("task_status_msg"))
-
-        if not edited_image_url:
-            logger.error("图片处理超时")
-            raise HTTPException(408, "图片处理超时")
-
-        # ========== 第二步：图生视频（可灵2.6） ==========
-        logger.info(f"🎬 视频生成开始 - 手机号: {phone}, 提示词: {prompt if prompt else '让图片动起来'}")
+        logger.info(f"🎬 视频生成开始 - 手机号: {phone}, 音频: {audio}, 提示词: {prompt if prompt else '让图片动起来'}")
         
         video_payload = {
             "contents": [
@@ -251,11 +213,11 @@ async def generate_video(
                 },
                 {
                     "type": "first_frame",
-                    "url": edited_image_url
+                    "url": f"data:image/jpeg;base64,{image_b64}"
                 }
             ],
             "settings": {
-                "audio": "off",
+                "audio": audio,
                 "resolution": "720p",
                 "duration": duration
             },
@@ -329,28 +291,30 @@ async def generate_video_background(
     image: UploadFile = File(...),
     prompt: str = Form(""),
     duration: int = Form(5),
+    audio: str = Form("off"),
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    logger.info(f"后台视频生成请求: 手机号={phone}, 时长={duration}s")
+    # 根据音频选项计算费用
+    if audio == "on":
+        cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
+    else:
+        cost = config.VIDEO_COSTS.get(duration, 50)
+
+    logger.info(f"后台视频生成请求: 手机号={phone}, 时长={duration}s, 音频={audio}")
     
     user = get_user_by_phone(db, phone)
     if not user:
         raise HTTPException(404, "用户不存在")
     
-    cost = config.VIDEO_COSTS.get(duration, 30)
     if user.credits < cost:
         raise HTTPException(403, f"余额不足，需要{cost}点")
     
-    # 先扣费
     user.credits -= cost
     db.commit()
     
-    # 创建任务ID
-    import uuid
     task_id = str(uuid.uuid4())
     
-    # 保存任务信息到数据库
     task = VideoTask(
         task_id=task_id,
         phone=phone,
@@ -364,12 +328,10 @@ async def generate_video_background(
     
     logger.info(f"后台任务创建成功: {task_id}")
     
-    # 启动后台线程处理
-    import threading
     image_data = await image.read()
     thread = threading.Thread(
         target=process_video_in_background,
-        args=(task_id, phone, image_data, prompt, duration, cost)
+        args=(task_id, phone, image_data, prompt, duration, audio, cost)
     )
     thread.start()
     
@@ -380,31 +342,27 @@ async def generate_video_background(
     }
 
 
-def process_video_in_background(task_id, phone, image_data, prompt, duration, cost):
+def process_video_in_background(task_id, phone, image_data, prompt, duration, audio, cost):
     """后台处理视频生成"""
     from database import SessionLocal
     db = SessionLocal()
     
-    logger.info(f"🎬 后台视频生成开始: 任务ID={task_id}, 手机号={phone}")
+    logger.info(f"🎬 后台视频生成开始: 任务ID={task_id}, 手机号={phone}, 音频={audio}")
     
     try:
-        # 更新任务状态
         task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
         task.status = "processing"
         db.commit()
-        logger.info(f"任务 {task_id}: 状态更新为 processing")
         
-        # 调用可灵API生成视频
         import base64
         image_b64 = base64.b64encode(image_data).decode()
         
-        # 保存用户上传的图片
         upload_filename = f"bg_video_{phone}_{task_id[:8]}.jpg"
         upload_path = os.path.join(UPLOAD_DIR, upload_filename)
         with open(upload_path, "wb") as f:
             f.write(image_data)
         
-        logger.info(f"📤 后台视频上传图片: {phone}")
+        logger.info(f"📤 用户上传图片: {phone}")
         logger.info(f"   图片URL: https://video-api.lingjing-media.com/uploads/{upload_filename}")
         
         headers = {
@@ -412,44 +370,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
             "Content-Type": "application/json"
         }
         
-        # 图生图
-        logger.info(f"任务 {task_id}: 开始图片处理")
-        edit_payload = {
-            "model_name": "kling-v3",
-            "prompt": prompt if prompt else "保持原图不变",
-            "image": f"data:image/jpeg;base64,{image_b64}",
-            "aspect_ratio": "1:1",
-            "n": 1
-        }
-        
-        resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=edit_payload, headers=headers)
-        edit_result = resp.json()
-        
-        if edit_result.get("code") != 0:
-            raise Exception(edit_result.get("message"))
-        
-        edit_task_id = edit_result["data"]["task_id"]
-        edited_image_url = None
-        
-        for i in range(30):
-            time.sleep(5)
-            edit_status = requests.get(
-                f"{config.KLING_API_URL}/images/generations/{edit_task_id}",
-                headers=headers
-            ).json()["data"]
-            logger.info(f"任务 {task_id}: 图片处理状态 {i+1}/30: {edit_status['task_status']}")
-            if edit_status["task_status"] == "succeed":
-                edited_image_url = edit_status["task_result"]["images"][0]["url"]
-                logger.info(f"任务 {task_id}: 图片处理成功")
-                break
-            elif edit_status["task_status"] == "failed":
-                raise Exception(edit_status.get("task_status_msg"))
-        
-        if not edited_image_url:
-            raise Exception("图片处理超时")
-        
-        # 图生视频（可灵2.6）
-        logger.info(f"🎬 后台视频生成 - 手机号: {phone}, 提示词: {prompt if prompt else '让图片动起来'}")
+        logger.info(f"🎬 开始生成视频 - 手机号: {phone}, 提示词: {prompt if prompt else '让图片动起来'}")
         
         video_payload = {
             "contents": [
@@ -459,11 +380,11 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 },
                 {
                     "type": "first_frame",
-                    "url": edited_image_url
+                    "url": f"data:image/jpeg;base64,{image_b64}"
                 }
             ],
             "settings": {
-                "audio": "off",
+                "audio": audio,
                 "resolution": "720p",
                 "duration": duration
             },
@@ -478,6 +399,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
 
         resp2 = requests.post("https://api-beijing.klingai.com/image-to-video/kling-2.6", json=video_payload, headers=headers)
         video_result = resp2.json()
+        logger.info(f"可灵2.6响应: {video_result}")
 
         if video_result.get("code") != 0:
             raise Exception(video_result.get("message"))
@@ -512,6 +434,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, co
                 
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
+                
                 task.video_url = video_url
                 task.status = "completed"
                 db.commit()
