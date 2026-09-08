@@ -5,4 +5,4 @@ requests
 python-multipart
 pydantic
 python-dotenv
-python-alipay-sdk==3.3.398
+python-alipay-sdk==3.4.0
