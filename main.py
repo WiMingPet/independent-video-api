@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
+from alipay_pay import create_page_payment, create_wap_payment, verify_notification
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse 
 from sqlalchemy.orm import Session
@@ -1266,6 +1268,132 @@ def get_uploaded_image(filename: str):
         return FileResponse(file_path)
     else:
         raise HTTPException(404, "图片不存在")
+
+# ========== 通用下载代理 ==========
+@app.get("/download")
+def download_proxy(url: str):
+    """代理下载，确保移动端也能下载"""
+    try:
+        resp = requests.get(url, timeout=60, stream=True)
+        if resp.status_code != 200:
+            raise HTTPException(404, "文件不存在")
+        
+        # 根据 URL 猜测文件类型
+        if ".mp4" in url:
+            media_type = "video/mp4"
+            ext = "mp4"
+        elif ".png" in url:
+            media_type = "image/png"
+            ext = "png"
+        else:
+            media_type = "image/jpeg"
+            ext = "jpg"
+        
+        filename = f"video_{int(time.time())}.{ext}"
+        
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(
+            resp.iter_content(chunk_size=1024*1024),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+    except Exception as e:
+        raise HTTPException(500, f"下载失败: {str(e)}")
+
+# ========== 支付宝充值接口 ==========
+@app.post("/alipay/create")
+async def create_alipay_payment(
+    phone: str = Form(...),
+    amount: float = Form(...),
+    db: Session = Depends(get_db)
+):
+    """创建支付宝支付订单"""
+    logger.info(f"支付宝充值请求: 手机号={phone}, 金额={amount}")
+    
+    user = get_user_by_phone(db, phone)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    
+    # 生成订单号
+    order_id = f"RECHARGE_{phone}_{int(time.time())}"
+    
+    # 创建支付链接
+    pay_url = create_wap_payment(
+        order_id=order_id,
+        amount=amount,
+        subject=f"视频生成服务充值{amount}元"
+    )
+    
+    logger.info(f"支付宝订单创建: {order_id}, 金额={amount}")
+    
+    return {
+        "code": 200,
+        "pay_url": pay_url,
+        "order_id": order_id
+    }
+
+# ========== 支付宝异步通知 ==========
+@app.post("/alipay/notify")
+async def alipay_notify(request: Request, db: Session = Depends(get_db)):
+    """支付宝异步通知"""
+    data = await request.form()
+    data_dict = dict(data)
+    
+    signature = data_dict.get("sign")
+    
+    # 验证签名
+    if verify_notification(data_dict, signature):
+        trade_status = data_dict.get("trade_status")
+        if trade_status == "TRADE_SUCCESS" or trade_status == "TRADE_FINISHED":
+            order_id = data_dict.get("out_trade_no")
+            amount = float(data_dict.get("total_amount"))
+            
+            # 解析手机号
+            phone = order_id.replace("RECHARGE_", "").rsplit("_", 1)[0]
+            
+            # 充值：1元=10点
+            user = get_user_by_phone(db, phone)
+            if user:
+                credits_to_add = int(amount * 10)
+                user.credits += credits_to_add
+                db.commit()
+                logger.info(f"✅ 支付宝充值成功: {phone}, 金额={amount}元, 增加{credits_to_add}点, 余额={user.credits}")
+            
+            return "success"
+    
+    return "fail"
+
+# ========== 查询订单状态 ==========
+@app.get("/alipay/query/{order_id}")
+async def query_alipay_order(order_id: str, db: Session = Depends(get_db)):
+    """查询支付宝订单状态"""
+    from alipay_pay import get_alipay_client
+    alipay = get_alipay_client()
+    result = alipay.api_alipay_trade_query(out_trade_no=order_id)
+    
+    trade_status = result.get("trade_status")
+    
+    # 如果支付成功且未充值
+    if trade_status in ["TRADE_SUCCESS", "TRADE_FINISHED"]:
+        phone = order_id.replace("RECHARGE_", "").rsplit("_", 1)[0]
+        user = get_user_by_phone(db, phone)
+        if user:
+            amount = float(result.get("total_amount"))
+            credits_to_add = int(amount * 10)
+            user.credits += credits_to_add
+            db.commit()
+            return {
+                "code": 200,
+                "status": "paid",
+                "credits": user.credits
+            }
+    
+    return {
+        "code": 200,
+        "status": trade_status
+    }
 
 # ========== 查询余额 ==========
 @app.get("/credits/{phone}")
