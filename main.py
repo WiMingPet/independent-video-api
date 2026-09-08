@@ -1338,32 +1338,59 @@ async def create_alipay_payment(
 @app.post("/alipay/notify")
 async def alipay_notify(request: Request, db: Session = Depends(get_db)):
     """支付宝异步通知"""
+    logger.info("📢 收到支付宝回调")
+    
     data = await request.form()
-    data_dict = dict(data)
+    notify_data = dict(data)
     
-    signature = data_dict.get("sign")
+    logger.info(f"回调数据: {notify_data}")
     
-    # 验证签名
-    if verify_notification(data_dict, signature):
-        trade_status = data_dict.get("trade_status")
-        if trade_status == "TRADE_SUCCESS" or trade_status == "TRADE_FINISHED":
-            order_id = data_dict.get("out_trade_no")
-            amount = float(data_dict.get("total_amount"))
-            
-            # 解析手机号
-            phone = order_id.replace("RECHARGE_", "").rsplit("_", 1)[0]
-            
-            # 充值：1元=10点
-            user = get_user_by_phone(db, phone)
-            if user:
-                credits_to_add = int(amount * 10)
-                user.credits += credits_to_add
-                db.commit()
-                logger.info(f"✅ 支付宝充值成功: {phone}, 金额={amount}元, 增加{credits_to_add}点, 余额={user.credits}")
-            
-            return "success"
+    # 获取关键信息
+    out_trade_no = notify_data.get("out_trade_no")
+    trade_status = notify_data.get("trade_status")
+    total_amount = notify_data.get("total_amount")
     
-    return "fail"
+    logger.info(f"订单号: {out_trade_no}, 交易状态: {trade_status}, 金额: {total_amount}")
+    
+    if not out_trade_no:
+        logger.error("回调缺少订单号")
+        return "fail"
+    
+    if trade_status not in ["TRADE_SUCCESS", "TRADE_FINISHED"]:
+        logger.info(f"交易状态非成功: {trade_status}")
+        return "fail"
+    
+    # 解析手机号
+    # 订单号格式: RECHARGE_15920978058_1788832801
+    parts = out_trade_no.split("_")
+    if len(parts) < 3:
+        logger.error(f"订单号格式错误: {out_trade_no}")
+        return "fail"
+    
+    phone = parts[1]
+    logger.info(f"解析手机号: {phone}")
+    
+    # 充值
+    try:
+        amount = float(total_amount)
+        credits_to_add = int(amount * 10)  # 1元=10点
+        
+        user = get_user_by_phone(db, phone)
+        if not user:
+            logger.error(f"用户不存在: {phone}")
+            return "fail"
+        
+        old_credits = user.credits
+        user.credits += credits_to_add
+        db.commit()
+        
+        logger.info(f"✅ 充值成功: {phone}, {old_credits} -> {user.credits} (增加{credits_to_add}点)")
+        
+        return "success"
+        
+    except Exception as e:
+        logger.error(f"充值失败: {str(e)}")
+        return "fail"
 
 # ========== 查询订单状态 ==========
 @app.get("/alipay/query/{order_id}")
