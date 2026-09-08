@@ -218,7 +218,7 @@ async def generate_video(
             ],
             "settings": {
                 "audio": audio,
-                "resolution": "720p",
+                "resolution": "1080p" if audio == "native" else "720p",
                 "duration": duration
             },
             "options": {
@@ -385,7 +385,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
             ],
             "settings": {
                 "audio": audio,
-                "resolution": "720p",
+                "resolution": "1080p" if audio == "native" else "720p",
                 "duration": duration
             },
             "options": {
