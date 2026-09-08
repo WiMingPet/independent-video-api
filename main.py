@@ -220,45 +220,56 @@ async def generate_video(
 
         # 检查是否有有效套餐
         sub = get_active_subscription(db, phone)
-        
+
         if sub:
-            # 套餐用户：只支持5秒
-            if duration != 5:
-                raise HTTPException(403, "套餐仅支持5秒视频")
-            
-            if audio == "native":
-                if sub.video_audio_used >= sub.video_audio_limit:
-                    raise HTTPException(403, "套餐有声视频次数已用完")
-                sub.video_audio_used += 1
+            if duration == 5:
+                if audio == "native":
+                    if sub.video_audio_limit > 0 and sub.video_audio_used < sub.video_audio_limit:
+                        sub.video_audio_used += 1
+                        cost = 0
+                    else:
+                        cost = config.VIDEO_COSTS_AUDIO.get(5, 70)
+                        if user.credits < cost:
+                            raise HTTPException(403, f"余额不足，需要{cost}点")
+                        user.credits -= cost
+                else:
+                    if sub.video_silent_limit > 0 and sub.video_silent_used < sub.video_silent_limit:
+                        sub.video_silent_used += 1
+                        cost = 0
+                    else:
+                        cost = config.VIDEO_COSTS.get(5, 50)
+                        if user.credits < cost:
+                            raise HTTPException(403, f"余额不足，需要{cost}点")
+                        user.credits -= cost
             else:
-                if sub.video_silent_used >= sub.video_silent_limit:
-                    raise HTTPException(403, "套餐无声视频次数已用完")
-                sub.video_silent_used += 1
-            
-            cost = 0
+                if audio == "native":
+                    cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
+                else:
+                    cost = config.VIDEO_COSTS.get(duration, 50)
+                if user.credits < cost:
+                    raise HTTPException(403, f"余额不足，需要{cost}点")
+                user.credits -= cost
+
             db.commit()
         else:
-            # 非套餐用户：正常扣点数
             if audio == "native":
                 cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
             else:
                 cost = config.VIDEO_COSTS.get(duration, 50)
-            
             if user.credits < cost:
                 raise HTTPException(403, f"余额不足，需要{cost}点")
-            
             user.credits -= cost
             db.commit()
 
         import base64
         image_data = await image.read()
         image_b64 = base64.b64encode(image_data).decode()
-        
+
         upload_filename = f"video_{phone}_{uuid.uuid4().hex[:8]}.jpg"
         upload_path = os.path.join(UPLOAD_DIR, upload_filename)
         with open(upload_path, "wb") as f:
             f.write(image_data)
-        
+
         logger.info(f"📤 用户上传图片: {phone}")
         logger.info(f"   图片URL: https://video-api.lingjing-media.com/uploads/{upload_filename}")
 
@@ -268,20 +279,13 @@ async def generate_video(
         }
 
         logger.info(f"🎬 视频生成开始 - 手机号: {phone}, 音频: {audio}, 提示词: {prompt if prompt else '让图片动起来'}")
-        
+
         if audio == "native":
-            # 有声视频使用可灵3.0
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
             video_payload = {
                 "contents": [
-                    {
-                        "type": "prompt",
-                        "text": prompt if prompt else "让图片动起来"
-                    },
-                    {
-                        "type": "first_frame",
-                        "url": f"data:image/jpeg;base64,{image_b64}"
-                    }
+                    {"type": "prompt", "text": prompt if prompt else "让图片动起来"},
+                    {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
                     "resolution": "720p",
@@ -292,24 +296,15 @@ async def generate_video(
                 "options": {
                     "callback_url": "",
                     "external_task_id": "",
-                    "watermark_info": {
-                        "enabled": False
-                    }
+                    "watermark_info": {"enabled": False}
                 }
             }
         else:
-            # 无声视频使用可灵2.6
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-2.6"
             video_payload = {
                 "contents": [
-                    {
-                        "type": "prompt",
-                        "text": prompt if prompt else "让图片动起来"
-                    },
-                    {
-                        "type": "first_frame",
-                        "url": f"data:image/jpeg;base64,{image_b64}"
-                    }
+                    {"type": "prompt", "text": prompt if prompt else "让图片动起来"},
+                    {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
                     "audio": "off",
@@ -319,9 +314,7 @@ async def generate_video(
                 "options": {
                     "callback_url": "",
                     "external_task_id": "",
-                    "watermark_info": {
-                        "enabled": False
-                    }
+                    "watermark_info": {"enabled": False}
                 }
             }
 
@@ -340,14 +333,14 @@ async def generate_video(
                 headers=headers
             )
             status_data = status_resp.json()
-            
+
             data_list = status_data.get("data", [])
             if not data_list:
                 continue
-            
+
             task_info = data_list[0]
             task_status = task_info.get("status", "")
-            
+
             if task_status == "succeeded":
                 outputs = task_info.get("outputs", [])
                 video_url = None
@@ -355,24 +348,23 @@ async def generate_video(
                     if output.get("type") == "video":
                         video_url = output.get("url")
                         break
-                
+
                 if not video_url:
                     raise HTTPException(400, "未找到视频URL")
-                
-                
+
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
                 db.commit()
-                
-                logger.info(f"✅ 视频生成成功 - 手机号: {phone}, 视频URL: {video_url}, 剩余余额: {user.credits}")
+
+                logger.info(f"✅ 视频生成成功 - 手机号: {phone}, 视频URL: {video_url}")
                 return {"code": 200, "video_url": video_url, "credits": user.credits}
-                
+
             elif task_status == "failed":
                 error_msg = task_info.get("message", "未知错误")
                 raise HTTPException(400, error_msg)
 
         raise HTTPException(408, "视频生成超时")
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -391,40 +383,50 @@ async def generate_video_background(
     db: Session = Depends(get_db)
 ):
     logger.info(f"后台视频生成请求: 手机号={phone}, 时长={duration}s, 音频={audio}")
-    
+
     user = get_user_by_phone(db, phone)
     if not user:
         raise HTTPException(404, "用户不存在")
-    
-    # 检查是否有有效套餐
+
     sub = get_active_subscription(db, phone)
-    
+
     if sub:
-        # 套餐用户：只支持5秒
-        if duration != 5:
-            raise HTTPException(403, "套餐仅支持5秒视频")
-        
-        if audio == "native":
-            if sub.video_audio_used >= sub.video_audio_limit:
-                raise HTTPException(403, "套餐有声视频次数已用完")
-            sub.video_audio_used += 1
+        if duration == 5:
+            if audio == "native":
+                if sub.video_audio_limit > 0 and sub.video_audio_used < sub.video_audio_limit:
+                    sub.video_audio_used += 1
+                    cost = 0
+                else:
+                    cost = config.VIDEO_COSTS_AUDIO.get(5, 70)
+                    if user.credits < cost:
+                        raise HTTPException(403, f"余额不足，需要{cost}点")
+                    user.credits -= cost
+            else:
+                if sub.video_silent_limit > 0 and sub.video_silent_used < sub.video_silent_limit:
+                    sub.video_silent_used += 1
+                    cost = 0
+                else:
+                    cost = config.VIDEO_COSTS.get(5, 50)
+                    if user.credits < cost:
+                        raise HTTPException(403, f"余额不足，需要{cost}点")
+                    user.credits -= cost
         else:
-            if sub.video_silent_used >= sub.video_silent_limit:
-                raise HTTPException(403, "套餐无声视频次数已用完")
-            sub.video_silent_used += 1
-        
-        cost = 0
+            if audio == "native":
+                cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
+            else:
+                cost = config.VIDEO_COSTS.get(duration, 50)
+            if user.credits < cost:
+                raise HTTPException(403, f"余额不足，需要{cost}点")
+            user.credits -= cost
+
         db.commit()
     else:
-        # 非套餐用户：正常扣点数
         if audio == "native":
             cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
         else:
             cost = config.VIDEO_COSTS.get(duration, 50)
-        
         if user.credits < cost:
             raise HTTPException(403, f"余额不足，需要{cost}点")
-        
         user.credits -= cost
         db.commit()
     
@@ -598,21 +600,23 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
         task.error_message = str(e)
         db.commit()
         
-        # 如果是套餐用户，恢复套餐次数
-        sub = get_active_subscription(db, phone)
-        if sub and cost == 0:
-            if audio == "native":
-                sub.video_audio_used = max(0, sub.video_audio_used - 1)
-            else:
-                sub.video_silent_used = max(0, sub.video_silent_used - 1)
-            db.commit()
-        else:
-            # 非套餐用户，退款点数
+        if cost > 0:
+            # 退还点数
             user = get_user_by_phone(db, phone)
             if user:
                 user.credits += cost
                 db.commit()
                 logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
+        else:
+            # 恢复套餐次数
+            sub = get_active_subscription(db, phone)
+            if sub:
+                if audio == "native":
+                    sub.video_audio_used = max(0, sub.video_audio_used - 1)
+                else:
+                    sub.video_silent_used = max(0, sub.video_silent_used - 1)
+                db.commit()
+                logger.info(f"任务 {task_id}: 已恢复套餐次数")
     finally:
         db.close()
 
