@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
 from alipay_pay import create_page_payment, create_wap_payment, verify_notification
+from datetime import timedelta
+from models import User, History, VideoTask, Subscription
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse 
@@ -104,6 +106,23 @@ def hash_password(pwd: str) -> str:
 def get_user_by_phone(db: Session, phone: str):
     return db.query(User).filter(User.phone == phone).first()
 
+# 套餐定义
+SUBSCRIPTION_PLANS = {
+    "plan_1000_a": {"name": "1000元套餐A", "amount": 1000.0, "video_silent": 300, "video_audio": 0, "images": 1000},
+    "plan_1000_b": {"name": "1000元套餐B", "amount": 1000.0, "video_silent": 50, "video_audio": 50, "images": 500},
+    "plan_500_a": {"name": "500元套餐A", "amount": 500.0, "video_silent": 150, "video_audio": 0, "images": 500},
+    "plan_500_b": {"name": "500元套餐B", "amount": 500.0, "video_silent": 50, "video_audio": 20, "images": 300},
+}
+
+def get_active_subscription(db: Session, phone: str):
+    """获取用户有效套餐"""
+    now = datetime.utcnow()
+    return db.query(Subscription).filter(
+        Subscription.phone == phone,
+        Subscription.status == "active",
+        Subscription.end_date > now
+    ).first()
+
 # ========== 认证接口 ==========
 @app.post("/register")
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
@@ -161,6 +180,27 @@ def admin_add_credits(req: AddCreditsRequest, db: Session = Depends(get_db)):
         logger.error(f"管理员充值异常: {str(e)}")
         raise
 
+@app.post("/subscription/create")
+async def create_subscription_payment(
+    phone: str = Form(...),
+    plan: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    user = get_user_by_phone(db, phone)
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    
+    if plan not in SUBSCRIPTION_PLANS:
+        raise HTTPException(400, "无效的套餐")
+    
+    plan_info = SUBSCRIPTION_PLANS[plan]
+    order_id = f"SUB_{phone}_{plan}_{int(time.time())}"
+    pay_url = create_wap_payment(order_id, plan_info["amount"], plan_info["name"])
+    
+    logger.info(f"套餐订单创建: {order_id}, 套餐: {plan_info['name']}")
+    
+    return {"code": 200, "pay_url": pay_url, "order_id": order_id}
+
 # ========== 视频生成接口 ==========
 @app.post("/video/generate")
 async def generate_video(
@@ -171,20 +211,43 @@ async def generate_video(
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    # 根据音频选项计算费用
-    if audio == "native":
-        cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
-    else:
-        cost = config.VIDEO_COSTS.get(duration, 50)
-    
     logger.info(f"视频生成请求: 手机号={phone}, 时长={duration}s, 音频={audio}, 提示词={prompt[:50]}")
     try:
         user = get_user_by_phone(db, phone)
         if not user:
             raise HTTPException(404, "用户不存在")
 
-        if user.credits < cost:
-            raise HTTPException(403, f"余额不足，需要{cost}点")
+        # 检查是否有有效套餐
+        sub = get_active_subscription(db, phone)
+        
+        if sub:
+            # 套餐用户：只支持5秒
+            if duration != 5:
+                raise HTTPException(403, "套餐仅支持5秒视频")
+            
+            if audio == "native":
+                if sub.video_audio_used >= sub.video_audio_limit:
+                    raise HTTPException(403, "套餐有声视频次数已用完")
+                sub.video_audio_used += 1
+            else:
+                if sub.video_silent_used >= sub.video_silent_limit:
+                    raise HTTPException(403, "套餐无声视频次数已用完")
+                sub.video_silent_used += 1
+            
+            cost = 0
+            db.commit()
+        else:
+            # 非套餐用户：正常扣点数
+            if audio == "native":
+                cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
+            else:
+                cost = config.VIDEO_COSTS.get(duration, 50)
+            
+            if user.credits < cost:
+                raise HTTPException(403, f"余额不足，需要{cost}点")
+            
+            user.credits -= cost
+            db.commit()
 
         import base64
         image_data = await image.read()
@@ -295,7 +358,7 @@ async def generate_video(
                 if not video_url:
                     raise HTTPException(400, "未找到视频URL")
                 
-                user.credits -= cost
+                
                 history = History(phone=phone, video_url=video_url, type="video")
                 db.add(history)
                 db.commit()
@@ -326,23 +389,43 @@ async def generate_video_background(
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    # 根据音频选项计算费用
-    if audio == "native":
-        cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
-    else:
-        cost = config.VIDEO_COSTS.get(duration, 50)
-
     logger.info(f"后台视频生成请求: 手机号={phone}, 时长={duration}s, 音频={audio}")
     
     user = get_user_by_phone(db, phone)
     if not user:
         raise HTTPException(404, "用户不存在")
     
-    if user.credits < cost:
-        raise HTTPException(403, f"余额不足，需要{cost}点")
+    # 检查是否有有效套餐
+    sub = get_active_subscription(db, phone)
     
-    user.credits -= cost
-    db.commit()
+    if sub:
+        # 套餐用户：只支持5秒
+        if duration != 5:
+            raise HTTPException(403, "套餐仅支持5秒视频")
+        
+        if audio == "native":
+            if sub.video_audio_used >= sub.video_audio_limit:
+                raise HTTPException(403, "套餐有声视频次数已用完")
+            sub.video_audio_used += 1
+        else:
+            if sub.video_silent_used >= sub.video_silent_limit:
+                raise HTTPException(403, "套餐无声视频次数已用完")
+            sub.video_silent_used += 1
+        
+        cost = 0
+        db.commit()
+    else:
+        # 非套餐用户：正常扣点数
+        if audio == "native":
+            cost = config.VIDEO_COSTS_AUDIO.get(duration, 70)
+        else:
+            cost = config.VIDEO_COSTS.get(duration, 50)
+        
+        if user.credits < cost:
+            raise HTTPException(403, f"余额不足，需要{cost}点")
+        
+        user.credits -= cost
+        db.commit()
     
     task_id = str(uuid.uuid4())
     
@@ -514,11 +597,21 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
         task.error_message = str(e)
         db.commit()
         
-        user = get_user_by_phone(db, phone)
-        if user:
-            user.credits += cost
+        # 如果是套餐用户，恢复套餐次数
+        sub = get_active_subscription(db, phone)
+        if sub and cost == 0:
+            if audio == "native":
+                sub.video_audio_used = max(0, sub.video_audio_used - 1)
+            else:
+                sub.video_silent_used = max(0, sub.video_silent_used - 1)
             db.commit()
-            logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
+        else:
+            # 非套餐用户，退款点数
+            user = get_user_by_phone(db, phone)
+            if user:
+                user.credits += cost
+                db.commit()
+                logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
     finally:
         db.close()
 
@@ -984,11 +1077,21 @@ async def generate_images(
             logger.error(f"图片生成失败: 用户不存在 {phone}")
             raise HTTPException(404, "用户不存在")
 
-        # 每张图片10点
-        cost = num_images * 10
-        if user.credits < cost:
-            logger.warning(f"图片生成失败: 余额不足 {phone}, 需要{cost}点, 当前{user.credits}点")
-            raise HTTPException(403, f"余额不足，需要{cost}点")
+        sub = get_active_subscription(db, phone)
+        
+        if sub:
+            remaining = sub.image_limit - sub.image_used
+            if remaining < num_images:
+                raise HTTPException(403, f"套餐图片剩余不足，剩余{remaining}张")
+            sub.image_used += num_images
+            cost = 0
+            db.commit()
+        else:
+            cost = num_images * 10
+            if user.credits < cost:
+                raise HTTPException(403, f"余额不足，需要{cost}点")
+            user.credits -= cost
+            db.commit()
 
         import base64
         image_data = await image.read()
@@ -1043,8 +1146,6 @@ async def generate_images(
                 images = status_data["task_result"]["images"]
                 image_urls = [img["url"] for img in images]
                 
-                # 扣费
-                user.credits -= cost
 
                 # 保存到历史记录
                 for image_url in image_urls:
@@ -1097,13 +1198,25 @@ async def generate_images_background(
     if not user:
         raise HTTPException(404, "用户不存在")
     
-    cost = num_images * 10
-    if user.credits < cost:
-        raise HTTPException(403, f"余额不足，需要{cost}点")
+    # 检查是否有有效套餐
+    sub = get_active_subscription(db, phone)
     
-    # 先扣费
-    user.credits -= cost
-    db.commit()
+    if sub:
+        # 套餐用户：检查剩余图片次数
+        remaining = sub.image_limit - sub.image_used
+        if remaining < num_images:
+            raise HTTPException(403, f"套餐图片剩余不足，剩余{remaining}张")
+        sub.image_used += num_images
+        cost = 0
+        db.commit()
+        logger.info(f"使用套餐生成图片: {phone}, 本次{num_images}张, 剩余{remaining - num_images}张")
+    else:
+        # 非套餐用户：正常扣点数
+        cost = num_images * 10
+        if user.credits < cost:
+            raise HTTPException(403, f"余额不足，需要{cost}点")
+        user.credits -= cost
+        db.commit()
     
     # 创建任务ID
     task_id = str(uuid.uuid4())
@@ -1234,11 +1347,19 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
         task.error_message = str(e)
         db.commit()
         
-        user = get_user_by_phone(db, phone)
-        if user:
-            user.credits += cost
+        # 如果是套餐用户，恢复套餐次数
+        sub = get_active_subscription(db, phone)
+        if sub and cost == 0:
+            sub.image_used = max(0, sub.image_used - num_images)
             db.commit()
-            logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
+            logger.info(f"任务 {task_id}: 已恢复套餐图片次数 {num_images} 张")
+        else:
+            # 非套餐用户，退款点数
+            user = get_user_by_phone(db, phone)
+            if user:
+                user.credits += cost
+                db.commit()
+                logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
     finally:
         db.close()
 
@@ -1343,6 +1464,46 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
         logger.info(f"交易状态非成功: {trade_status}")
         return "fail"
     
+    # ========== 处理套餐订单 ==========
+    if out_trade_no.startswith("SUB_"):
+        parts = out_trade_no.split("_")
+        if len(parts) >= 3:
+            sub_phone = parts[1]
+            plan = parts[2]
+            
+            if plan in SUBSCRIPTION_PLANS:
+                plan_info = SUBSCRIPTION_PLANS[plan]
+                sub = get_active_subscription(db, sub_phone)
+                
+                if sub:
+                    # 续期
+                    sub.plan_name = plan
+                    sub.video_silent_limit = plan_info["video_silent"]
+                    sub.video_audio_limit = plan_info["video_audio"]
+                    sub.image_limit = plan_info["images"]
+                    sub.video_silent_used = 0
+                    sub.video_audio_used = 0
+                    sub.image_used = 0
+                    sub.end_date = datetime.utcnow() + timedelta(days=30)
+                else:
+                    sub = Subscription(
+                        phone=sub_phone,
+                        plan_name=plan,
+                        video_silent_limit=plan_info["video_silent"],
+                        video_audio_limit=plan_info["video_audio"],
+                        image_limit=plan_info["images"],
+                        start_date=datetime.utcnow(),
+                        end_date=datetime.utcnow() + timedelta(days=30)
+                    )
+                    db.add(sub)
+                
+                db.commit()
+                logger.info(f"✅ 套餐开通成功: {sub_phone}, 套餐: {plan}")
+                return "success"
+        
+        return "fail"
+    
+    # ========== 处理点数充值 ==========
     # 解析手机号
     # 订单号格式: RECHARGE_15920978058_1788832801
     parts = out_trade_no.split("_")
@@ -1414,6 +1575,26 @@ async def query_alipay_order(order_id: str, db: Session = Depends(get_db)):
     return {
         "code": 200,
         "status": trade_status
+    }
+
+# ========== 查询套餐信息 ==========
+@app.get("/subscription/{phone}")
+def get_subscription_info(phone: str, db: Session = Depends(get_db)):
+    """查询用户套餐信息"""
+    logger.info(f"查询套餐信息: {phone}")
+    
+    sub = get_active_subscription(db, phone)
+    if not sub:
+        return {"code": 200, "active": False}
+    
+    return {
+        "code": 200,
+        "active": True,
+        "plan_name": sub.plan_name,
+        "video_silent_remaining": sub.video_silent_limit - sub.video_silent_used,
+        "video_audio_remaining": sub.video_audio_limit - sub.video_audio_used,
+        "image_remaining": sub.image_limit - sub.image_used,
+        "end_date": str(sub.end_date)
     }
 
 # ========== 查询余额 ==========

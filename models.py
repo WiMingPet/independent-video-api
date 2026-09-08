@@ -31,3 +31,19 @@ class VideoTask(Base):
     cost = Column(Integer, default=0)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String, index=True)
+    plan_name = Column(String)
+    video_silent_limit = Column(Integer, default=0)
+    video_audio_limit = Column(Integer, default=0)
+    image_limit = Column(Integer, default=0)
+    video_silent_used = Column(Integer, default=0)
+    video_audio_used = Column(Integer, default=0)
+    image_used = Column(Integer, default=0)
+    start_date = Column(DateTime, default=func.now())
+    end_date = Column(DateTime)
+    status = Column(String, default="active")
+    created_at = Column(DateTime, default=func.now())
