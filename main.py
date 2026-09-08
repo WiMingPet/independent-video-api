@@ -205,32 +205,63 @@ async def generate_video(
 
         logger.info(f"🎬 视频生成开始 - 手机号: {phone}, 音频: {audio}, 提示词: {prompt if prompt else '让图片动起来'}")
         
-        video_payload = {
-            "contents": [
-                {
-                    "type": "prompt",
-                    "text": prompt if prompt else "让图片动起来"
+        if audio == "native":
+            # 有声视频使用可灵3.0
+            video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
+            video_payload = {
+                "contents": [
+                    {
+                        "type": "prompt",
+                        "text": prompt if prompt else "让图片动起来"
+                    },
+                    {
+                        "type": "first_frame",
+                        "url": f"data:image/jpeg;base64,{image_b64}"
+                    }
+                ],
+                "settings": {
+                    "resolution": "720p",
+                    "duration": duration,
+                    "audio": "native",
+                    "multi_shot": False
                 },
-                {
-                    "type": "first_frame",
-                    "url": f"data:image/jpeg;base64,{image_b64}"
-                }
-            ],
-            "settings": {
-                "audio": audio,
-                "resolution": "1080p" if audio == "native" else "720p",
-                "duration": duration
-            },
-            "options": {
-                "callback_url": "",
-                "external_task_id": "",
-                "watermark_info": {
-                    "enabled": False
+                "options": {
+                    "callback_url": "",
+                    "external_task_id": "",
+                    "watermark_info": {
+                        "enabled": False
+                    }
                 }
             }
-        }
+        else:
+            # 无声视频使用可灵2.6
+            video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-2.6"
+            video_payload = {
+                "contents": [
+                    {
+                        "type": "prompt",
+                        "text": prompt if prompt else "让图片动起来"
+                    },
+                    {
+                        "type": "first_frame",
+                        "url": f"data:image/jpeg;base64,{image_b64}"
+                    }
+                ],
+                "settings": {
+                    "audio": "off",
+                    "resolution": "720p",
+                    "duration": duration
+                },
+                "options": {
+                    "callback_url": "",
+                    "external_task_id": "",
+                    "watermark_info": {
+                        "enabled": False
+                    }
+                }
+            }
 
-        resp2 = requests.post("https://api-beijing.klingai.com/image-to-video/kling-2.6", json=video_payload, headers=headers)
+        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
         video_result = resp2.json()
 
         if video_result.get("code") != 0:
@@ -372,34 +403,63 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
         
         logger.info(f"🎬 开始生成视频 - 手机号: {phone}, 提示词: {prompt if prompt else '让图片动起来'}")
         
-        video_payload = {
-            "contents": [
-                {
-                    "type": "prompt",
-                    "text": prompt if prompt else "让图片动起来"
+        if audio == "native":
+            video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
+            video_payload = {
+                "contents": [
+                    {
+                        "type": "prompt",
+                        "text": prompt if prompt else "让图片动起来"
+                    },
+                    {
+                        "type": "first_frame",
+                        "url": f"data:image/jpeg;base64,{image_b64}"
+                    }
+                ],
+                "settings": {
+                    "resolution": "720p",
+                    "duration": duration,
+                    "audio": "native",
+                    "multi_shot": False
                 },
-                {
-                    "type": "first_frame",
-                    "url": f"data:image/jpeg;base64,{image_b64}"
-                }
-            ],
-            "settings": {
-                "audio": audio,
-                "resolution": "1080p" if audio == "native" else "720p",
-                "duration": duration
-            },
-            "options": {
-                "callback_url": "",
-                "external_task_id": task_id,
-                "watermark_info": {
-                    "enabled": False
+                "options": {
+                    "callback_url": "",
+                    "external_task_id": task_id,
+                    "watermark_info": {
+                        "enabled": False
+                    }
                 }
             }
-        }
+        else:
+            video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-2.6"
+            video_payload = {
+                "contents": [
+                    {
+                        "type": "prompt",
+                        "text": prompt if prompt else "让图片动起来"
+                    },
+                    {
+                        "type": "first_frame",
+                        "url": f"data:image/jpeg;base64,{image_b64}"
+                    }
+                ],
+                "settings": {
+                    "audio": "off",
+                    "resolution": "720p",
+                    "duration": duration
+                },
+                "options": {
+                    "callback_url": "",
+                    "external_task_id": task_id,
+                    "watermark_info": {
+                        "enabled": False
+                    }
+                }
+            }
 
-        resp2 = requests.post("https://api-beijing.klingai.com/image-to-video/kling-2.6", json=video_payload, headers=headers)
+        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
         video_result = resp2.json()
-        logger.info(f"可灵2.6响应: {video_result}")
+        logger.info(f"可灵响应: {video_result}")
 
         if video_result.get("code") != 0:
             raise Exception(video_result.get("message"))
