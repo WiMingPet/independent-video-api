@@ -320,8 +320,10 @@ async def generate_video(
 
         resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
         video_result = resp2.json()
+        logger.info(f"可灵API响应: {video_result}")
 
         if video_result.get("code") != 0:
+            logger.error(f"可灵API错误: {video_result}")
             raise HTTPException(400, video_result.get("message"))
 
         video_task_id = video_result["data"]["id"]
@@ -366,8 +368,37 @@ async def generate_video(
         raise HTTPException(408, "视频生成超时")
 
     except HTTPException:
+        # 如果是HTTPException（如400、403），也需要退款
+        if cost > 0:
+            user.credits += cost
+            db.commit()
+            logger.info(f"视频生成失败，退款 {cost} 点给 {phone}")
+        else:
+            sub = get_active_subscription(db, phone)
+            if sub:
+                if audio == "native":
+                    sub.video_audio_used = max(0, sub.video_audio_used - 1)
+                else:
+                    sub.video_silent_used = max(0, sub.video_silent_used - 1)
+                db.commit()
+                logger.info(f"视频生成失败，恢复套餐次数")
         raise
     except Exception as e:
+        # 退款
+        if cost > 0:
+            user.credits += cost
+            db.commit()
+            logger.info(f"视频生成失败，退款 {cost} 点给 {phone}")
+        else:
+            sub = get_active_subscription(db, phone)
+            if sub:
+                if audio == "native":
+                    sub.video_audio_used = max(0, sub.video_audio_used - 1)
+                else:
+                    sub.video_silent_used = max(0, sub.video_silent_used - 1)
+                db.commit()
+                logger.info(f"视频生成失败，恢复套餐次数")
+        
         logger.error(f"视频生成异常: {str(e)}")
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"服务器错误: {str(e)}")
