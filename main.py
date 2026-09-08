@@ -1373,7 +1373,13 @@ async def alipay_notify(request: Request, db: Session = Depends(get_db)):
     # 充值
     try:
         amount = float(total_amount)
-        credits_to_add = int(amount * 10)  # 1元=10点
+        # 精确点数映射
+        credits_map = {
+            9.9: 100,
+            29.9: 300,
+            49.9: 500
+        }
+        credits_to_add = credits_map.get(amount, int(amount * 10))
         
         user = get_user_by_phone(db, phone)
         if not user:
@@ -1408,7 +1414,12 @@ async def query_alipay_order(order_id: str, db: Session = Depends(get_db)):
         user = get_user_by_phone(db, phone)
         if user:
             amount = float(result.get("total_amount"))
-            credits_to_add = int(amount * 10)
+            credits_map = {
+                9.9: 100,
+                29.9: 300,
+                49.9: 500
+            }
+            credits_to_add = credits_map.get(amount, int(amount * 10))
             user.credits += credits_to_add
             db.commit()
             return {
