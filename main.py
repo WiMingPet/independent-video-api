@@ -1148,15 +1148,18 @@ async def generate_images(
         }
         
         payload = {
-            "model_name": "kling-v3",
-            "prompt": prompt if prompt else "保持原图不变",
-            "image": f"data:image/jpeg;base64,{image_b64}",
-            "aspect_ratio": "1:1",
-            "n": num_images  # 生成张数
+            "model_name": "kling-v3-omni",
+            "prompt": prompt if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
+            "image_list": [
+                {"image": f"data:image/jpeg;base64,{image_b64}"}
+            ],
+            "resolution": "1k",
+            "n": num_images,
+            "aspect_ratio": "1:1"
         }
 
-        logger.info(f"开始调用可灵API生成{num_images}张图片")
-        resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=payload, headers=headers)
+        logger.info(f"开始调用可灵Omni API生成{num_images}张图片")
+        resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
         result = resp.json()
         logger.info(f"可灵图片生成API响应: code={result.get('code')}, message={result.get('message')}")
 
@@ -1171,7 +1174,7 @@ async def generate_images(
         for i in range(30):
             time.sleep(5)
             status_resp = requests.get(
-                f"{config.KLING_API_URL}/images/generations/{task_id}",
+                f"{config.KLING_API_URL}/images/omni-image/{task_id}",
                 headers=headers
             )
             status_data = status_resp.json()["data"]
@@ -1213,10 +1216,23 @@ async def generate_images(
         raise HTTPException(408, "生成超时")
         
     except HTTPException:
+        # 恢复套餐次数或退款
+        if sub and cost == 0:
+            sub.image_used = max(0, sub.image_used - num_images)
+            db.commit()
+        elif cost > 0:
+            user.credits += cost
+            db.commit()
         raise
     except Exception as e:
+        # 恢复套餐次数或退款
+        if sub and cost == 0:
+            sub.image_used = max(0, sub.image_used - num_images)
+            db.commit()
+        elif cost > 0:
+            user.credits += cost
+            db.commit()
         logger.error(f"图片生成异常: {str(e)}")
-        logger.error(traceback.format_exc())
         raise HTTPException(500, f"服务器错误: {str(e)}")
 
 # ========== 图片后台生成接口 ==========
@@ -1318,15 +1334,18 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
         }
         
         payload = {
-            "model_name": "kling-v3",
-            "prompt": prompt if prompt else "保持原图不变",
-            "image": f"data:image/jpeg;base64,{image_b64}",
-            "aspect_ratio": "1:1",
-            "n": num_images
+            "model_name": "kling-v3-omni",
+            "prompt": prompt if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
+            "image_list": [
+                {"image": f"data:image/jpeg;base64,{image_b64}"}
+            ],
+            "resolution": "1k",
+            "n": num_images,
+            "aspect_ratio": "1:1"
         }
         
-        logger.info(f"任务 {task_id}: 开始调用可灵API生成{num_images}张图片")
-        resp = requests.post(f"{config.KLING_API_URL}/images/generations", json=payload, headers=headers)
+        logger.info(f"任务 {task_id}: 开始调用可灵Omni API生成{num_images}张图片")
+        resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
         result = resp.json()
         logger.info(f"任务 {task_id}: 可灵API响应 code={result.get('code')}, message={result.get('message')}")
         
@@ -1339,7 +1358,7 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
         for i in range(30):
             time.sleep(5)
             status_resp = requests.get(
-                f"{config.KLING_API_URL}/images/generations/{keling_task_id}",
+                f"{config.KLING_API_URL}/images/omni-image/{keling_task_id}",
                 headers=headers
             )
             status_data = status_resp.json()["data"]
