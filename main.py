@@ -675,6 +675,39 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
         
     except Exception as e:
         logger.error(f"❌ 后台视频生成失败: {task_id}, 错误: {str(e)}")
+        
+        # ========== 退款前再确认一次任务状态 ==========
+        final_status = None
+        try:
+            if 'video_task_id' in locals() and video_task_id:
+                confirm_resp = requests.get(
+                    f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
+                    headers={"Authorization": f"Bearer {config.KLING_API_KEY}"}
+                )
+                confirm_data = confirm_resp.json()
+                data_list = confirm_data.get("data", [])
+                if data_list:
+                    final_status = data_list[0].get("status", "")
+                    logger.info(f"任务 {task_id}: 退款前确认状态={final_status}")
+                    
+                    # 如果实际已成功，不退款，保存视频
+                    if final_status == "succeeded":
+                        outputs = data_list[0].get("outputs", [])
+                        for output in outputs:
+                            if output.get("type") == "video":
+                                video_url = output.get("url")
+                                history = History(phone=phone, video_url=video_url, type="video")
+                                db.add(history)
+                                task.video_url = video_url
+                                task.status = "completed"
+                                db.commit()
+                                logger.info(f"✅ 任务 {task_id}: 退款前确认成功，已保存视频 {video_url}")
+                                return
+        except Exception as confirm_err:
+            logger.error(f"任务 {task_id}: 退款前确认失败: {str(confirm_err)}")
+        # ========== 确认结束 ==========
+        
+        # 确认不是成功，执行退款
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
@@ -713,6 +746,28 @@ def get_task_status(task_id: str, db: Session = Depends(get_db)):
         "status": task.status,
         "video_url": task.video_url,
         "error_message": task.error_message
+    }
+
+@app.get("/tasks/pending/{phone}")
+def get_pending_tasks(phone: str, db: Session = Depends(get_db)):
+    """查询用户未完成的任务"""
+    tasks = db.query(VideoTask).filter(
+        VideoTask.phone == phone,
+        VideoTask.status.in_(["pending", "processing"])
+    ).order_by(VideoTask.created_at.desc()).limit(5).all()
+    
+    return {
+        "code": 200,
+        "data": [
+            {
+                "task_id": t.task_id,
+                "status": t.status,
+                "prompt": t.prompt,
+                "duration": t.duration,
+                "created_at": str(t.created_at)
+            }
+            for t in tasks
+        ]
     }
 
 # ========== 虚拟试穿接口（生成视频） ==========
@@ -1133,6 +1188,36 @@ def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
         
     except Exception as e:
         logger.error(f"❌ 后台虚拟试穿失败: 任务ID={task_id}, 错误: {str(e)}")
+        
+        # ========== 退款前再确认一次 ==========
+        try:
+            if 'video_task_id' in locals() and video_task_id:
+                confirm_resp = requests.get(
+                    f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
+                    headers={"Authorization": f"Bearer {config.KLING_API_KEY}"}
+                )
+                confirm_data = confirm_resp.json()
+                data_list = confirm_data.get("data", [])
+                if data_list:
+                    confirm_status = data_list[0].get("status", "")
+                    logger.info(f"任务 {task_id}: 退款前确认状态={confirm_status}")
+                    
+                    if confirm_status == "succeeded":
+                        outputs = data_list[0].get("outputs", [])
+                        for output in outputs:
+                            if output.get("type") == "video":
+                                video_url = output.get("url")
+                                history = History(phone=phone, video_url=video_url, type="video")
+                                db.add(history)
+                                task.video_url = video_url
+                                task.status = "completed"
+                                db.commit()
+                                logger.info(f"✅ 任务 {task_id}: 退款前确认成功，已保存试穿视频 {video_url}")
+                                return
+        except Exception as confirm_err:
+            logger.error(f"任务 {task_id}: 退款前确认失败: {str(confirm_err)}")
+        # ========== 确认结束 ==========
+        
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
@@ -1446,6 +1531,31 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
         
     except Exception as e:
         logger.error(f"❌ 后台图片生成失败: 任务ID={task_id}, 错误: {str(e)}")
+        
+        # ========== 退款前再确认一次 ==========
+        try:
+            if 'keling_task_id' in locals() and keling_task_id:
+                confirm_resp = requests.get(
+                    f"{config.KLING_API_URL}/images/omni-image/{keling_task_id}",
+                    headers={"Authorization": f"Bearer {config.KLING_API_KEY}"}
+                )
+                confirm_data = confirm_resp.json()
+                confirm_status = confirm_data.get("data", {}).get("task_status", "")
+                logger.info(f"任务 {task_id}: 退款前确认状态={confirm_status}")
+                
+                if confirm_status == "succeed":
+                    images = confirm_data["data"]["task_result"]["images"]
+                    for img in images:
+                        history = History(phone=phone, video_url=img["url"], type="image")
+                        db.add(history)
+                    task.status = "completed"
+                    db.commit()
+                    logger.info(f"✅ 任务 {task_id}: 退款前确认成功，已保存图片，不退款")
+                    return
+        except Exception as confirm_err:
+            logger.error(f"任务 {task_id}: 退款前确认失败: {str(confirm_err)}")
+        # ========== 确认结束 ==========
+        
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
