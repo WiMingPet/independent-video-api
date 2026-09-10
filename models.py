@@ -29,6 +29,7 @@ class VideoTask(Base):
     video_url = Column(String, nullable=True)
     error_message = Column(String, nullable=True)
     cost = Column(Integer, default=0)
+    request_hash = Column(String, nullable=True, index=True)  # 新增
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 

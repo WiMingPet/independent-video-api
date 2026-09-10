@@ -22,6 +22,7 @@ import config
 from logging_config import logger, setup_logging
 import traceback
 import os
+import hashlib
 
 # 创建上传目录
 UPLOAD_DIR = "uploads"
@@ -86,6 +87,21 @@ except Exception as e:
     print(f"数据库迁移: {e}")
 # ========== 迁移结束 ==========
 
+# ========== 迁移 request_hash 字段 ==========
+try:
+    with engine.connect() as conn:
+        result = conn.execute(text("PRAGMA table_info(video_tasks)"))
+        columns = [row[1] for row in result]
+        if 'request_hash' not in columns:
+            conn.execute(text("ALTER TABLE video_tasks ADD COLUMN request_hash VARCHAR"))
+            conn.commit()
+            print("✅ 添加 request_hash 字段成功")
+        else:
+            print("✅ request_hash 字段已存在")
+except Exception as e:
+    print(f"request_hash 迁移: {e}")
+# ========== request_hash 迁移结束 ==========
+
 # ========== 数据模型 ==========
 class LoginRequest(BaseModel):
     phone: str
@@ -106,6 +122,11 @@ def hash_password(pwd: str) -> str:
 
 def get_user_by_phone(db: Session, phone: str):
     return db.query(User).filter(User.phone == phone).first()
+
+def generate_request_hash(phone: str, prompt: str, duration: int, audio: str) -> str:
+    """生成请求去重哈希"""
+    raw = f"{phone}_{prompt}_{duration}_{audio}"
+    return hashlib.md5(raw.encode()).hexdigest()
 
 # 套餐定义
 SUBSCRIPTION_PLANS = {
@@ -217,6 +238,20 @@ async def generate_video(
         user = get_user_by_phone(db, phone)
         if not user:
             raise HTTPException(404, "用户不存在")
+
+        # ========== 防重复提交检查 ==========
+        request_hash = generate_request_hash(phone, prompt or "", duration, audio)
+        recent_task = db.query(VideoTask).filter(
+            VideoTask.phone == phone,
+            VideoTask.request_hash == request_hash,
+            VideoTask.status.in_(["pending", "processing"]),
+            VideoTask.created_at >= datetime.utcnow() - timedelta(minutes=5)
+        ).first()
+
+        if recent_task:
+            logger.warning(f"检测到重复提交: {phone}, 任务ID={recent_task.task_id}")
+            raise HTTPException(429, "相同任务正在处理中，请勿重复提交")
+        # ========== 防重复检查结束 ==========
 
         # 检查是否有有效套餐
         sub = get_active_subscription(db, phone)
@@ -461,6 +496,18 @@ async def generate_video_background(
         user.credits -= cost
         db.commit()
     
+    # 防重复检查
+    request_hash = generate_request_hash(phone, prompt or "", duration, audio)
+    recent_task = db.query(VideoTask).filter(
+        VideoTask.phone == phone,
+        VideoTask.request_hash == request_hash,
+        VideoTask.status.in_(["pending", "processing"]),
+        VideoTask.created_at >= datetime.utcnow() - timedelta(minutes=5)
+    ).first()
+
+    if recent_task:
+        raise HTTPException(429, "相同任务正在处理中，请勿重复提交")
+
     task_id = str(uuid.uuid4())
     
     task = VideoTask(
@@ -469,7 +516,8 @@ async def generate_video_background(
         status="pending",
         prompt=prompt,
         duration=duration,
-        cost=cost
+        cost=cost,
+        request_hash=request_hash
     )
     db.add(task)
     db.commit()
