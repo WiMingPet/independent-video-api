@@ -991,6 +991,7 @@ async def tryon_background(
     
     # 创建任务ID
     task_id = str(uuid.uuid4())
+    request_hash = generate_request_hash(phone, "", 0, "")
     
     # 保存任务信息
     task = VideoTask(
@@ -1411,6 +1412,7 @@ async def generate_images_background(
     
     # 创建任务ID
     task_id = str(uuid.uuid4())
+    request_hash = generate_request_hash(phone, prompt or "", 0, "")
     
     # 保存任务信息
     task = VideoTask(
