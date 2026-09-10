@@ -339,7 +339,7 @@ async def generate_video(
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
             video_payload = {
                 "contents": [
-                    {"type": "prompt", "text": enhance_prompt(prompt),
+                    {"type": "prompt", "text": enhance_prompt(prompt)},
                     {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
@@ -358,7 +358,7 @@ async def generate_video(
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-2.6"
             video_payload = {
                 "contents": [
-                    {"type": "prompt", "text": enhance_prompt(prompt),
+                    {"type": "prompt", "text": enhance_prompt(prompt)},
                     {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
