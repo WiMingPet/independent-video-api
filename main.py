@@ -514,7 +514,7 @@ async def generate_video_background(
         task_id=task_id,
         phone=phone,
         status="pending",
-        prompt=prompt,
+        prompt="[视频]" + (prompt or ""),
         duration=duration,
         cost=cost,
         request_hash=request_hash
@@ -750,25 +750,29 @@ def get_task_status(task_id: str, db: Session = Depends(get_db)):
 
 @app.get("/tasks/pending/{phone}")
 def get_pending_tasks(phone: str, db: Session = Depends(get_db)):
-    """查询用户未完成的任务"""
     tasks = db.query(VideoTask).filter(
         VideoTask.phone == phone,
         VideoTask.status.in_(["pending", "processing"])
     ).order_by(VideoTask.created_at.desc()).limit(5).all()
     
-    return {
-        "code": 200,
-        "data": [
-            {
-                "task_id": t.task_id,
-                "status": t.status,
-                "prompt": t.prompt,
-                "duration": t.duration,
-                "created_at": str(t.created_at)
-            }
-            for t in tasks
-        ]
-    }
+    result = []
+    for t in tasks:
+        task_type = "video"
+        if t.prompt and t.prompt.startswith("[试穿]"):
+            task_type = "tryon"
+        elif t.prompt and t.prompt.startswith("[图片]"):
+            task_type = "image"
+        
+        result.append({
+            "task_id": t.task_id,
+            "status": t.status,
+            "prompt": t.prompt,
+            "duration": t.duration,
+            "task_type": task_type,
+            "created_at": str(t.created_at)
+        })
+    
+    return {"code": 200, "data": result}
 
 # ========== 虚拟试穿接口（生成视频） ==========
 @app.post("/tryon")
@@ -993,8 +997,10 @@ async def tryon_background(
         task_id=task_id,
         phone=phone,
         status="pending",
-        prompt="虚拟试穿",
-        cost=cost
+        prompt="[试穿]",
+        duration=0,
+        cost=cost,
+        request_hash=request_hash
     )
     db.add(task)
     db.commit()
@@ -1411,9 +1417,10 @@ async def generate_images_background(
         task_id=task_id,
         phone=phone,
         status="pending",
-        prompt=prompt,
+        prompt="[图片]" + (prompt or ""),
+        duration=0,
         cost=cost,
-        video_url=None  # 图片任务
+        request_hash=request_hash
     )
     db.add(task)
     db.commit()
