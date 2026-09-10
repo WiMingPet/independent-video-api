@@ -128,23 +128,31 @@ def generate_request_hash(phone: str, prompt: str, duration: int, audio: str) ->
     raw = f"{phone}_{prompt}_{duration}_{audio}"
     return hashlib.md5(raw.encode()).hexdigest()
 
-def enhance_prompt(prompt: str) -> str:
-    """增强提示词，提升动作精准度，不添加固定限制"""
-    if not prompt:
-        return "让人物自然微动，动作流畅"
+def enhance_prompt(prompt: str, model: str = "2.6", sound: str = "off") -> str:
+    """
+    增强提示词，提升动作精准度
+    - 用户没写：不干预
+    - 用户写了：只补充缺失的信息
+    """
+    if not prompt or not prompt.strip():
+        return ""  # 不干预，让可灵自由发挥
     
-    # 只在用户没有明确描述节奏时补充
-    if any(word in prompt for word in ["转身", "走动", "跳舞", "挥手", "跑", "跳", "蹲", "坐", "躺"]):
+    prompt = prompt.strip()
+    
+    # ========== 1. 动作类：补充节奏描述 ==========
+    action_keywords = [
+        "转身", "走动", "跳舞", "挥手", "跑", "跳", "蹲", "坐", "躺",
+        "微笑", "点头", "摇头", "抬手", "伸手", "举手",
+        "展示", "拿着", "举起", "放下", "看镜头", "看向", "注视"
+    ]
+    if any(word in prompt for word in action_keywords):
         if "缓慢" not in prompt and "自然" not in prompt and "快速" not in prompt:
             prompt += "，动作流畅自然"
     
-    # 说话类补充口型同步
-    if ("说" in prompt or "唱" in prompt) and "口型" not in prompt:
-        prompt += "，口型与语音同步"
-    
-    # 多个动作时补充顺序
-    if prompt.count("，") >= 2 and "顺序" not in prompt and "然后" not in prompt:
-        prompt += "，动作按描述顺序依次完成"
+    # ========== 2. 说话类：补充口型同步（仅3.0有声） ==========
+    if model == "3.0" and sound == "native":
+        if ("说" in prompt or "唱" in prompt) and "口型" not in prompt:
+            prompt += "，口型与语音同步"
     
     return prompt
 
@@ -339,7 +347,7 @@ async def generate_video(
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
             video_payload = {
                 "contents": [
-                    {"type": "prompt", "text": enhance_prompt(prompt)},
+                    {"type": "prompt", "text": enhance_prompt(prompt, model="3.0", sound="native")},
                     {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
@@ -358,7 +366,7 @@ async def generate_video(
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-2.6"
             video_payload = {
                 "contents": [
-                    {"type": "prompt", "text": enhance_prompt(prompt)},
+                    {"type": "prompt", "text": enhance_prompt(prompt, model="2.6", sound="off")},
                     {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
@@ -594,7 +602,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
                 "contents": [
                     {
                         "type": "prompt",
-                        "text": enhance_prompt(prompt),
+                        "text": enhance_prompt(prompt, model="3.0", sound="native")
                     },
                     {
                         "type": "first_frame",
@@ -621,7 +629,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
                 "contents": [
                     {
                         "type": "prompt",
-                        "text": enhance_prompt(prompt),
+                        "text": enhance_prompt(prompt, model="2.6", sound="off")
                     },
                     {
                         "type": "first_frame",
