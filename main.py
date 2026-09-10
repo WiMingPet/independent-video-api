@@ -128,6 +128,26 @@ def generate_request_hash(phone: str, prompt: str, duration: int, audio: str) ->
     raw = f"{phone}_{prompt}_{duration}_{audio}"
     return hashlib.md5(raw.encode()).hexdigest()
 
+def enhance_prompt(prompt: str) -> str:
+    """增强提示词，提升动作精准度，不添加固定限制"""
+    if not prompt:
+        return "让人物自然微动，动作流畅"
+    
+    # 只在用户没有明确描述节奏时补充
+    if any(word in prompt for word in ["转身", "走动", "跳舞", "挥手", "跑", "跳", "蹲", "坐", "躺"]):
+        if "缓慢" not in prompt and "自然" not in prompt and "快速" not in prompt:
+            prompt += "，动作流畅自然"
+    
+    # 说话类补充口型同步
+    if ("说" in prompt or "唱" in prompt) and "口型" not in prompt:
+        prompt += "，口型与语音同步"
+    
+    # 多个动作时补充顺序
+    if prompt.count("，") >= 2 and "顺序" not in prompt and "然后" not in prompt:
+        prompt += "，动作按描述顺序依次完成"
+    
+    return prompt
+
 # 套餐定义
 SUBSCRIPTION_PLANS = {
     "plan_1000_a": {"name": "1000元套餐A", "amount": 1000.0, "video_silent": 300, "video_audio": 0, "images": 1000},
@@ -319,7 +339,7 @@ async def generate_video(
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
             video_payload = {
                 "contents": [
-                    {"type": "prompt", "text": prompt if prompt else "让图片动起来"},
+                    {"type": "prompt", "text": enhance_prompt(prompt),
                     {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
@@ -338,7 +358,7 @@ async def generate_video(
             video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-2.6"
             video_payload = {
                 "contents": [
-                    {"type": "prompt", "text": prompt if prompt else "让图片动起来"},
+                    {"type": "prompt", "text": enhance_prompt(prompt),
                     {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
                 ],
                 "settings": {
@@ -574,7 +594,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
                 "contents": [
                     {
                         "type": "prompt",
-                        "text": prompt if prompt else "让图片动起来"
+                        "text": enhance_prompt(prompt),
                     },
                     {
                         "type": "first_frame",
@@ -601,7 +621,7 @@ def process_video_in_background(task_id, phone, image_data, prompt, duration, au
                 "contents": [
                     {
                         "type": "prompt",
-                        "text": prompt if prompt else "让图片动起来"
+                        "text": enhance_prompt(prompt),
                     },
                     {
                         "type": "first_frame",
@@ -822,7 +842,7 @@ async def tryon(
         logger.info("开始调用可灵API生成试穿图片")
         payload = {
             "model_name": "kling-v3-omni",
-            "prompt": "给模特穿上服装，保持姿势和背景不变，服装细节保持",
+            "prompt": enhance_prompt("给模特穿上服装，服装细节保持"),
             "image_list": [
                 {"image": f"data:image/jpeg;base64,{model_b64}"},
                 {"image": f"data:image/jpeg;base64,{cloth_b64}"}
@@ -1064,7 +1084,7 @@ def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
         logger.info(f"任务 {task_id}: 开始生成试穿图片")
         payload = {
             "model_name": "kling-v3-omni",
-            "prompt": "给模特穿上服装，保持姿势和背景不变，服装细节保持",
+            "prompt": enhance_prompt("给模特穿上服装，服装细节保持"),
             "image_list": [
                 {"image": f"data:image/jpeg;base64,{model_b64}"},
                 {"image": f"data:image/jpeg;base64,{cloth_b64}"}
@@ -1289,7 +1309,7 @@ async def generate_images(
         
         payload = {
             "model_name": "kling-v3-omni",
-            "prompt": prompt if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
+            "prompt": enhance_prompt(prompt) if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
             "image_list": [
                 {"image": f"data:image/jpeg;base64,{image_b64}"}
             ],
@@ -1477,7 +1497,7 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
         
         payload = {
             "model_name": "kling-v3-omni",
-            "prompt": prompt if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
+            "prompt": enhance_prompt(prompt) if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
             "image_list": [
                 {"image": f"data:image/jpeg;base64,{image_b64}"}
             ],
