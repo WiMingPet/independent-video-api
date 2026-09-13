@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
 from alipay_pay import create_page_payment, create_wap_payment, verify_notification
-from datetime import timedelta
+
 from models import User, History, VideoTask, Subscription
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +22,7 @@ import config
 from logging_config import logger, setup_logging
 import traceback
 import os
-import hashlib
+
 
 # 创建上传目录
 UPLOAD_DIR = "uploads"
@@ -282,6 +282,8 @@ async def generate_video(
         # ========== 防重复检查结束 ==========
 
         # 检查是否有有效套餐
+        sub = None
+        cost = 0
         sub = get_active_subscription(db, phone)
 
         if sub:
@@ -482,6 +484,8 @@ async def generate_video_background(
     if not user:
         raise HTTPException(404, "用户不存在")
 
+    sub = None
+    cost = 0
     sub = get_active_subscription(db, phone)
 
     if sub:
@@ -786,10 +790,12 @@ def get_pending_tasks(phone: str, db: Session = Depends(get_db)):
     result = []
     for t in tasks:
         task_type = "video"
-        if t.prompt and t.prompt.startswith("[试穿]"):
-            task_type = "tryon"
+        if t.prompt and t.prompt.startswith("[Omni]"):
+            task_type = "omni"
         elif t.prompt and t.prompt.startswith("[图片]"):
             task_type = "image"
+        elif t.prompt and t.prompt.startswith("[试穿]"):
+            task_type = "tryon"
         
         result.append({
             "task_id": t.task_id,
@@ -802,457 +808,235 @@ def get_pending_tasks(phone: str, db: Session = Depends(get_db)):
     
     return {"code": 200, "data": result}
 
-# ========== 虚拟试穿接口（生成视频） ==========
-@app.post("/tryon")
-async def tryon(
-    model_image: UploadFile = File(...),
-    cloth_image: UploadFile = File(...),
+@app.post("/omni/generate/background")
+async def generate_omni_background(
+    image: UploadFile = File(...),
+    prompt: str = Form(""),
+    text: str = Form(""),
+    duration: int = Form(5),
+    voice_id: str = Form("zhinen_xuesheng"),
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    logger.info(f"虚拟试穿请求: 手机号={phone}")
-    try:
-        user = get_user_by_phone(db, phone)
-        if not user:
-            logger.error(f"虚拟试穿失败: 用户不存在 {phone}")
-            raise HTTPException(404, "用户不存在")
-
-        cost = 80  # 试穿扣80点
-        if user.credits < cost:
-            logger.warning(f"虚拟试穿失败: 余额不足 {phone}, 需要{cost}点, 当前{user.credits}点")
-            raise HTTPException(403, f"余额不足，需要{cost}点")
-
-        import base64
-        model_data = await model_image.read()
-        cloth_data = await cloth_image.read()
-        model_b64 = base64.b64encode(model_data).decode()
-        cloth_b64 = base64.b64encode(cloth_data).decode()
-        
-        # 保存用户上传的图片
-        model_filename = f"tryon_model_{phone}_{uuid.uuid4().hex[:8]}.jpg"
-        cloth_filename = f"tryon_cloth_{phone}_{uuid.uuid4().hex[:8]}.jpg"
-        
-        with open(os.path.join(UPLOAD_DIR, model_filename), "wb") as f:
-            f.write(model_data)
-        with open(os.path.join(UPLOAD_DIR, cloth_filename), "wb") as f:
-            f.write(cloth_data)
-        
-        logger.info(f"📤 试穿上传图片: {phone}")
-        logger.info(f"   模特图URL: https://video-api.lingjing-media.com/uploads/{model_filename}")
-        logger.info(f"   服装图URL: https://video-api.lingjing-media.com/uploads/{cloth_filename}")
-
-        headers = {
-            "Authorization": f"Bearer {config.KLING_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        # ========== 第一步：生成试穿图片 ==========
-        logger.info("开始调用可灵API生成试穿图片")
-        payload = {
-            "model_name": "kling-v3-omni",
-            "prompt": enhance_prompt("给模特穿上服装，服装细节保持"),
-            "image_list": [
-                {"image": f"data:image/jpeg;base64,{model_b64}"},
-                {"image": f"data:image/jpeg;base64,{cloth_b64}"}
-            ],
-            "resolution": "2k",
-            "aspect_ratio": "1:1",
-            "n": 1
-        }
-
-        resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
-        result = resp.json()
-        logger.info(f"可灵试穿API响应: code={result.get('code')}, message={result.get('message')}")
-
-        if result.get("code") != 0:
-            logger.error(f"试穿图片生成失败: {result.get('message')}")
-            raise HTTPException(400, result.get("message"))
-
-        tryon_task_id = result["data"]["task_id"]
-        logger.info(f"试穿图片任务ID: {tryon_task_id}")
-        tryon_image_url = None
-
-        # 轮询试穿图片结果
-        for i in range(30):
-            time.sleep(5)
-            status_resp = requests.get(
-                f"{config.KLING_API_URL}/images/omni-image/{tryon_task_id}",
-                headers=headers
-            )
-            status_data = status_resp.json()["data"]
-            logger.info(f"试穿图片生成状态 {i+1}/30: {status_data['task_status']}")
-            
-            if status_data["task_status"] == "succeed":
-                tryon_image_url = status_data["task_result"]["images"][0]["url"]
-                logger.info("试穿图片生成成功")
-                break
-            elif status_data["task_status"] == "failed":
-                logger.error(f"试穿图片生成失败: {status_data.get('task_status_msg')}")
-                raise HTTPException(400, status_data.get("task_status_msg"))
-
-        if not tryon_image_url:
-            logger.error("试穿图片生成超时")
-            raise HTTPException(408, "试穿图片生成超时")
-
-        # ========== 第二步：图片转视频（可灵3.0） ==========
-        logger.info("开始调用可灵3.0生成试穿视频")
-        
-        video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
-        
-        video_payload = {
-            "contents": [
-                {
-                    "type": "prompt",
-                    "text": "让模特自然展示试穿效果，轻微转动身体"
-                },
-                {
-                    "type": "first_frame",
-                    "url": tryon_image_url
-                }
-            ],
-            "settings": {
-                "resolution": "720p",
-                "duration": 5,
-                "audio": "off",
-                "multi_shot": False
-            },
-            "options": {
-                "callback_url": "",
-                "external_task_id": f"tryon_{phone}_{int(time.time())}",
-                "watermark_info": {
-                    "enabled": False
-                }
-            }
-        }
-
-        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
-        video_result = resp2.json()
-        logger.info(f"可灵3.0视频API响应: {video_result}")
-
-        if video_result.get("code") != 0:
-            logger.error(f"视频生成失败: {video_result.get('message')}")
-            raise HTTPException(400, video_result.get("message"))
-
-        video_task_id = video_result["data"]["id"]
-        logger.info(f"可灵3.0视频任务ID: {video_task_id}")
-
-        # 轮询视频生成结果
-        for i in range(60):
-            time.sleep(5)
-            status_resp = requests.get(
-                f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
-                headers=headers
-            )
-            status_data = status_resp.json()
-            logger.info(f"视频生成状态检查 {i+1}/60: {status_data}")
-            
-            if status_data.get("code") != 0:
-                continue
-            
-            data_list = status_data.get("data", [])
-            if not data_list:
-                continue
-            
-            task_info = data_list[0]
-            task_status = task_info.get("status", "")
-            
-            if task_status == "succeeded":
-                outputs = task_info.get("outputs", [])
-                video_url = None
-                for output in outputs:
-                    if output.get("type") == "video":
-                        video_url = output.get("url")
-                        break
-                
-                if not video_url:
-                    raise HTTPException(400, "未找到视频URL")
-                
-                user.credits -= cost
-                history = History(phone=phone, video_url=video_url, type="video")
-                db.add(history)
-                db.commit()
-                
-                logger.info(f"✅ 虚拟试穿成功!")
-                logger.info(f"   手机号: {phone}")
-                logger.info(f"   试穿图片: {tryon_image_url}")
-                logger.info(f"   视频URL: {video_url}")
-                logger.info(f"   剩余余额: {user.credits}")
-                
-                return {"code": 200, "video_url": video_url, "credits": user.credits}
-                
-            elif task_status == "failed":
-                error_msg = task_info.get("message", "未知错误")
-                logger.error(f"视频生成失败: {error_msg}")
-                raise HTTPException(400, error_msg)
-
-        logger.error("视频生成超时")
-        raise HTTPException(408, "视频生成超时")
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"虚拟试穿异常: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(500, f"服务器错误: {str(e)}")
-
-# ========== 虚拟试穿后台生成接口（生成视频） ==========
-@app.post("/tryon/background")
-async def tryon_background(
-    model_image: UploadFile = File(...),
-    cloth_image: UploadFile = File(...),
-    phone: str = Form(...),
-    db: Session = Depends(get_db)
-):
-    logger.info(f"后台虚拟试穿请求: 手机号={phone}")
+    logger.info(f"Omni请求: 手机号={phone}, 时长={duration}s, 台词={text[:30]}")
     
     user = get_user_by_phone(db, phone)
     if not user:
         raise HTTPException(404, "用户不存在")
     
-    cost = 80  # 试穿扣80点
+    cost_map = {5: 70, 10: 140, 15: 210}
+    cost = cost_map.get(duration, 70)
+    
+    # 防重复检查
+    request_hash = generate_request_hash(phone, text or "", duration, "omni")
+    recent_task = db.query(VideoTask).filter(
+        VideoTask.phone == phone,
+        VideoTask.request_hash == request_hash,
+        VideoTask.status.in_(["pending", "processing"]),
+        VideoTask.created_at >= datetime.utcnow() - timedelta(minutes=5)
+    ).first()
+    
+    if recent_task:
+        raise HTTPException(429, "相同任务正在处理中，请勿重复提交")
+    
     if user.credits < cost:
         raise HTTPException(403, f"余额不足，需要{cost}点")
     
-    # 先扣费
     user.credits -= cost
     db.commit()
     
-    # 创建任务ID
     task_id = str(uuid.uuid4())
-    request_hash = generate_request_hash(phone, "", 0, "")
     
-    # 保存任务信息
     task = VideoTask(
         task_id=task_id,
         phone=phone,
         status="pending",
-        prompt="[试穿]",
-        duration=0,
+        prompt="[Omni]" + (prompt or ""),
+        duration=duration,
         cost=cost,
         request_hash=request_hash
     )
     db.add(task)
     db.commit()
     
-    # 读取图片数据
-    model_data = await model_image.read()
-    cloth_data = await cloth_image.read()
-    
-    # 启动后台线程
+    image_data = await image.read()
     thread = threading.Thread(
-        target=process_tryon_in_background,
-        args=(task_id, phone, model_data, cloth_data, cost)
+        target=process_omni_in_background,
+        args=(task_id, phone, image_data, prompt, text, duration, voice_id, cost)
     )
     thread.start()
     
-    logger.info(f"后台试穿任务创建成功: {task_id}")
-    
-    return {
-        "code": 200,
-        "message": "任务已提交，将在后台生成",
-        "task_id": task_id
-    }
+    return {"code": 200, "message": "任务已提交", "task_id": task_id}
 
 
-def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
-    """后台处理虚拟试穿，生成视频"""
+def process_omni_in_background(task_id, phone, image_data, prompt, text, duration, voice_id, cost):
+    """后台处理 Omni + 对口型 + TTS 组合"""
     from database import SessionLocal
     db = SessionLocal()
     
-    logger.info(f"🎬 后台虚拟试穿开始: 任务ID={task_id}, 手机号={phone}")
+    logger.info(f"🎬 Omni任务开始: {task_id}")
     
     try:
-        # 更新任务状态
         task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
         task.status = "processing"
         db.commit()
-        logger.info(f"任务 {task_id}: 状态更新为 processing")
+        logger.info(f"   手机号: {phone}, 提示词: {prompt[:50]}, 台词: {text[:30]}, 时长: {duration}s, 音色: {voice_id}")
         
         import base64
-        model_b64 = base64.b64encode(model_data).decode()
-        cloth_b64 = base64.b64encode(cloth_data).decode()
+        image_b64 = base64.b64encode(image_data).decode()
         
-        # 保存用户上传的图片
-        model_filename = f"bg_tryon_model_{phone}_{task_id[:8]}.jpg"
-        cloth_filename = f"bg_tryon_cloth_{phone}_{task_id[:8]}.jpg"
-        
-        with open(os.path.join(UPLOAD_DIR, model_filename), "wb") as f:
-            f.write(model_data)
-        with open(os.path.join(UPLOAD_DIR, cloth_filename), "wb") as f:
-            f.write(cloth_data)
-        
-        logger.info(f"📤 后台试穿上传: {phone}, 模特图={model_filename}, 服装图={cloth_filename}")
+        upload_filename = f"omni_{phone}_{task_id[:8]}.jpg"
+        upload_path = os.path.join(UPLOAD_DIR, upload_filename)
+        with open(upload_path, "wb") as f:
+            f.write(image_data)
+        logger.info(f"📤 Omni上传图片: {phone}, 文件={upload_filename}")
         
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
             "Content-Type": "application/json"
         }
         
-        # ========== 第一步：生成试穿图片 ==========
-        logger.info(f"任务 {task_id}: 开始生成试穿图片")
-        payload = {
-            "model_name": "kling-v3-omni",
-            "prompt": enhance_prompt("给模特穿上服装，服装细节保持"),
-            "image_list": [
-                {"image": f"data:image/jpeg;base64,{model_b64}"},
-                {"image": f"data:image/jpeg;base64,{cloth_b64}"}
-            ],
-            "resolution": "2k",
-            "aspect_ratio": "1:1",
-            "n": 1
-        }
-        
-        resp = requests.post(f"{config.KLING_API_URL}/images/omni-image", json=payload, headers=headers)
-        result = resp.json()
-        logger.info(f"任务 {task_id}: 试穿图片API响应 code={result.get('code')}")
-        
-        if result.get("code") != 0:
-            raise Exception(result.get("message"))
-        
-        tryon_task_id = result["data"]["task_id"]
-        tryon_image_url = None
-        
-        for i in range(30):
-            time.sleep(5)
-            status_resp = requests.get(
-                f"{config.KLING_API_URL}/images/omni-image/{tryon_task_id}",
-                headers=headers
-            )
-            status_data = status_resp.json()["data"]
-            logger.info(f"任务 {task_id}: 试穿图片生成状态 {i+1}/30: {status_data['task_status']}")
-            
-            if status_data["task_status"] == "succeed":
-                tryon_image_url = status_data["task_result"]["images"][0]["url"]
-                logger.info(f"任务 {task_id}: 试穿图片生成成功")
-                break
-            elif status_data["task_status"] == "failed":
-                raise Exception(status_data.get("task_status_msg"))
-        
-        if not tryon_image_url:
-            raise Exception("试穿图片生成超时")
-        
-        # 图片转视频（可灵3.0）
-        logger.info(f"任务 {task_id}: 开始调用可灵3.0生成视频")
-        
-        video_api_url = "https://api-beijing.klingai.com/image-to-video/kling-3.0"
-        
-        video_payload = {
+        # ===== 第1步：Omni 生成哑剧视频 =====
+        logger.info(f"任务 {task_id}: 第1步 Omni生成哑剧视频")
+        omni_payload = {
             "contents": [
-                {
-                    "type": "prompt",
-                    "text": "让模特自然展示试穿效果，轻微转动身体"
-                },
-                {
-                    "type": "first_frame",
-                    "url": tryon_image_url
-                }
+                {"type": "prompt", "text": prompt if prompt else "人物自然说话"},
+                {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
             ],
             "settings": {
                 "resolution": "720p",
-                "duration": 5,
+                "duration": duration,
                 "audio": "off",
                 "multi_shot": False
             },
-            "options": {
-                "callback_url": "",
-                "external_task_id": task_id,
-                "watermark_info": {
-                    "enabled": False
-                }
-            }
+            "options": {"external_task_id": task_id}
         }
         
-        resp2 = requests.post(video_api_url, json=video_payload, headers=headers)
-        video_result = resp2.json()
-        logger.info(f"任务 {task_id}: 可灵3.0响应: {video_result}")
+        resp = requests.post(
+            "https://api-beijing.klingai.com/omni-video/kling-3.0-omni",
+            json=omni_payload, headers=headers
+        )
+        omni_result = resp.json()
+        if omni_result.get("code") != 0:
+            raise Exception(f"Omni失败: {omni_result.get('message')}")
         
-        if video_result.get("code") != 0:
-            raise Exception(video_result.get("message"))
-        
-        video_task_id = video_result["data"]["id"]
+        omni_task_id = omni_result["data"]["id"]
+        omni_video_url = None
         
         for i in range(60):
             time.sleep(5)
             status_resp = requests.get(
-                f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
+                f"https://api-beijing.klingai.com/tasks?task_ids={omni_task_id}",
                 headers=headers
             )
-            status_data = status_resp.json()
-            logger.info(f"任务 {task_id}: 查询响应: {status_data}")
-            
-            if status_data.get("code") != 0:
-                continue
-            
-            data_list = status_data.get("data", [])
+            data_list = status_resp.json().get("data", [])
             if not data_list:
                 continue
-            
             task_info = data_list[0]
-            task_status = task_info.get("status", "")
-            logger.info(f"任务 {task_id}: 视频生成状态 {i+1}/60: {task_status}")
-            
-            if task_status == "succeeded":
-                outputs = task_info.get("outputs", [])
-                video_url = None
-                for output in outputs:
+            if task_info.get("status") == "succeeded":
+                for output in task_info.get("outputs", []):
                     if output.get("type") == "video":
-                        video_url = output.get("url")
+                        omni_video_url = output.get("url")
                         break
-                
-                if not video_url:
-                    raise Exception("未找到视频URL")
-                
-                history = History(phone=phone, video_url=video_url, type="video")
-                db.add(history)
-                
-                task.video_url = video_url
-                task.status = "completed"
-                db.commit()
-                
-                logger.info(f"✅ 后台虚拟试穿成功!")
-                logger.info(f"   手机号: {phone}")
-                logger.info(f"   视频URL: {video_url}")
-                
-                return
-                
-            elif task_status == "failed":
-                error_msg = task_info.get("message", "未知错误")
-                raise Exception(error_msg)
+                break
+            elif task_info.get("status") == "failed":
+                raise Exception(f"Omni失败: {task_info.get('message')}")
         
-        raise Exception("视频生成超时")
+        if not omni_video_url:
+            raise Exception("Omni超时")
+        logger.info(f"任务 {task_id}: Omni视频成功")
+        logger.info(f"   Omni视频URL: {omni_video_url}")
+        
+        # ===== 第2步：TTS 生成音频 =====
+        logger.info(f"任务 {task_id}: 第2步 TTS生成音频")
+        tts_payload = {
+            "text": text,
+            "voice_id": voice_id,
+            "voice_language": "zh",
+            "voice_speed": 1.0
+        }
+        tts_resp = requests.post(
+            "https://api-beijing.klingai.com/v1/audio/tts",
+            json=tts_payload, headers=headers
+        )
+        tts_result = tts_resp.json()
+        if tts_result.get("code") != 0:
+            raise Exception(f"TTS失败: {tts_result.get('message')}")
+        
+        audios = tts_result["data"]["task_result"]["audios"]
+        if not audios:
+            raise Exception("TTS未返回音频")
+        audio_id = audios[0]["id"]
+        logger.info(f"任务 {task_id}: TTS成功 audio_id={audio_id}, 音频URL={audios[0].get('url')}")
+        
+        # ===== 第3步：人脸识别 =====
+        logger.info(f"任务 {task_id}: 第3步 人脸识别")
+        face_payload = {"video_url": omni_video_url}
+        face_resp = requests.post(
+            "https://api-beijing.klingai.com/v1/videos/identify-face",
+            json=face_payload, headers=headers
+        )
+        face_result = face_resp.json()
+        if face_result.get("code") != 0:
+            raise Exception(f"人脸识别失败: {face_result.get('message')}")
+        
+        session_id = face_result["data"]["session_id"]
+        face_id = face_result["data"]["face_choose"][0]["face_id"]
+        logger.info(f"任务 {task_id}: 人脸识别成功")
+        
+        # ===== 第4步：对口型 =====
+        logger.info(f"任务 {task_id}: 第4步 对口型")
+        lip_payload = {
+            "session_id": session_id,
+            "face_choose": [{
+                "face_id": face_id,
+                "audio_id": audio_id,
+                "sound_start_time": 0,
+                "sound_end_time": duration * 1000,
+                "sound_insert_time": 0,
+                "sound_volume": 1.0,
+                "original_audio_volume": 1.0
+            }],
+            "external_task_id": task_id
+        }
+        lip_resp = requests.post(
+            "https://api-beijing.klingai.com/v1/videos/advanced-lip-sync",
+            json=lip_payload, headers=headers
+        )
+        lip_result = lip_resp.json()
+        if lip_result.get("code") != 0:
+            raise Exception(f"对口型失败: {lip_result.get('message')}")
+        
+        lip_task_id = lip_result["data"]["task_id"]
+        final_video_url = None
+        
+        for i in range(60):
+            time.sleep(5)
+            lip_status = requests.get(
+                f"https://api-beijing.klingai.com/v1/videos/advanced-lip-sync/{lip_task_id}",
+                headers=headers
+            ).json()
+            if lip_status.get("data", {}).get("task_status") == "succeed":
+                videos = lip_status["data"]["task_result"]["videos"]
+                if videos:
+                    final_video_url = videos[0]["url"]
+                break
+            elif lip_status.get("data", {}).get("task_status") == "failed":
+                raise Exception("对口型失败")
+        
+        if not final_video_url:
+            raise Exception("对口型超时")
+        
+        history = History(phone=phone, video_url=final_video_url, type="video")
+        db.add(history)
+        task.video_url = final_video_url
+        task.status = "completed"
+        db.commit()
+        
+        logger.info(f"✅ 任务 {task_id}: Omni+对口型完成 {final_video_url}")
         
     except Exception as e:
-        logger.error(f"❌ 后台虚拟试穿失败: 任务ID={task_id}, 错误: {str(e)}")
-        
-        # ========== 退款前再确认一次 ==========
-        try:
-            if 'video_task_id' in locals() and video_task_id:
-                confirm_resp = requests.get(
-                    f"https://api-beijing.klingai.com/tasks?task_ids={video_task_id}",
-                    headers={"Authorization": f"Bearer {config.KLING_API_KEY}"}
-                )
-                confirm_data = confirm_resp.json()
-                data_list = confirm_data.get("data", [])
-                if data_list:
-                    confirm_status = data_list[0].get("status", "")
-                    logger.info(f"任务 {task_id}: 退款前确认状态={confirm_status}")
-                    
-                    if confirm_status == "succeeded":
-                        outputs = data_list[0].get("outputs", [])
-                        for output in outputs:
-                            if output.get("type") == "video":
-                                video_url = output.get("url")
-                                history = History(phone=phone, video_url=video_url, type="video")
-                                db.add(history)
-                                task.video_url = video_url
-                                task.status = "completed"
-                                db.commit()
-                                logger.info(f"✅ 任务 {task_id}: 退款前确认成功，已保存试穿视频 {video_url}")
-                                return
-        except Exception as confirm_err:
-            logger.error(f"任务 {task_id}: 退款前确认失败: {str(confirm_err)}")
-        # ========== 确认结束 ==========
-        
+        logger.error(f"❌ 任务 {task_id} 失败: {str(e)}")
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
@@ -1261,7 +1045,7 @@ def process_tryon_in_background(task_id, phone, model_data, cloth_data, cost):
         if user:
             user.credits += cost
             db.commit()
-            logger.info(f"任务 {task_id}: 已退款 {cost} 点给 {phone}")
+            logger.info(f"任务 {task_id}: 已退款 {cost} 点")
     finally:
         db.close()
 
@@ -1281,6 +1065,8 @@ async def generate_images(
             logger.error(f"图片生成失败: 用户不存在 {phone}")
             raise HTTPException(404, "用户不存在")
 
+        sub = None
+        cost = 0
         sub = get_active_subscription(db, phone)
         
         if sub:
@@ -1317,7 +1103,7 @@ async def generate_images(
         
         payload = {
             "model_name": "kling-v3-omni",
-            "prompt": enhance_prompt(prompt) if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
+            "prompt": enhance_prompt(prompt, model="2.6", sound="off") if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
             "image_list": [
                 {"image": f"data:image/jpeg;base64,{image_b64}"}
             ],
@@ -1419,6 +1205,8 @@ async def generate_images_background(
         raise HTTPException(404, "用户不存在")
     
     # 检查是否有有效套餐
+    sub = None
+    cost = 0
     sub = get_active_subscription(db, phone)
     
     if sub:
@@ -1505,7 +1293,7 @@ def process_images_in_background(task_id, phone, image_data, prompt, num_images,
         
         payload = {
             "model_name": "kling-v3-omni",
-            "prompt": enhance_prompt(prompt) if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
+            "prompt": enhance_prompt(prompt, model="2.6", sound="off") if prompt else "保持原图不变，保留人物面部特征、五官、发型、服装细节",
             "image_list": [
                 {"image": f"data:image/jpeg;base64,{image_b64}"}
             ],
