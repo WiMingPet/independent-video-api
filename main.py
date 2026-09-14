@@ -1017,8 +1017,12 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             raise Exception(f"人脸识别失败: {face_result.get('message')}")
         
         session_id = face_result["data"]["session_id"]
-        face_id = face_result["data"]["face_choose"][0]["face_id"]
-        logger.info(f"任务 {task_id}: 人脸识别成功")
+        # 人脸识别返回的字段是 face_data，不是 face_choose
+        face_data = face_result["data"].get("face_data", [])
+        if not face_data:
+            raise Exception("未检测到人脸，请更换人物照片")
+        face_id = face_data[0]["face_id"]
+        logger.info(f"任务 {task_id}: 人脸识别响应: {face_result}")
         
         # ===== 第4步：对口型 =====
         logger.info(f"任务 {task_id}: 第4步 对口型")
