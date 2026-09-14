@@ -858,8 +858,8 @@ async def generate_omni_background(
     if not voice_id:
         raise HTTPException(400, "请选择音色")
 
-    cost_map = {5: 70, 10: 140, 15: 210}
-    cost = cost_map.get(duration, 70)
+    cost_map = {5: 50, 10: 100, 15: 150}
+    cost = cost_map.get(duration, 50)
     
     # 防重复检查
     request_hash = generate_request_hash(phone, text or "", duration, "omni")
