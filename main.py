@@ -811,28 +811,33 @@ def get_pending_tasks(phone: str, db: Session = Depends(get_db)):
 # ========== 获取音色列表 ==========
 @app.get("/voices")
 def get_voices():
-    """获取账户下可用的音色列表"""
-    try:
-        headers = {"Authorization": f"Bearer {config.KLING_API_KEY}"}
-        resp = requests.get(
-            "https://api-beijing.klingai.com/v1/general/presets-voices?pageNum=1&pageSize=100",
-            headers=headers
-        )
-        data = resp.json()
-        
-        voices = []
-        for item in data.get("data", []):
-            for voice in item.get("task_result", {}).get("voices", []):
-                voices.append({
-                    "voice_id": voice.get("voice_id"),
-                    "voice_name": voice.get("voice_name")
-                })
-        
-        logger.info(f"获取到 {len(voices)} 个音色")
-        return {"code": 200, "data": voices}
-    except Exception as e:
-        logger.error(f"获取音色失败: {str(e)}")
-        return {"code": 500, "message": str(e)}
+    """获取官方预置音色列表"""
+    official_voices = [
+        # ===== 女声 =====
+        {"voice_id": "ai_shatang", "voice_name": "青春少女"},
+        {"voice_id": "genshin_klee2", "voice_name": "温柔小妹"},
+        {"voice_id": "genshin_kirara", "voice_name": "元气少女"},
+        {"voice_id": "girlfriend_1_speech02", "voice_name": "甜美邻家"},
+        {"voice_id": "chat1_female_new-3", "voice_name": "温柔姐姐"},
+        {"voice_id": "girlfriend_2_speech02", "voice_name": "职场女青"},
+        {"voice_id": "cartoon-girl-01", "voice_name": "俏皮女童"},
+        {"voice_id": "you_pingjing", "voice_name": "温柔妈妈"},
+        {"voice_id": "chengshu_jiejie", "voice_name": "优雅贵妇"},
+        {"voice_id": "laopopo_speech02", "voice_name": "唠叨奶奶"},
+        {"voice_id": "heainainai_speech02", "voice_name": "和蔼奶奶"},
+        {"voice_id": "chuanmeizi_speech02", "voice_name": "四川妹子"},
+        {"voice_id": "tianjinjiejie_speech02", "voice_name": "天津姐姐"},
+        {"voice_id": "guanxiaofang-v2", "voice_name": "元气少女2"},
+        {"voice_id": "tianmeixuemei-v1", "voice_name": "撒娇女友"},
+        # ===== 男声 =====
+        {"voice_id": "dongbeilaotie_speech02", "voice_name": "东北老铁"},
+        {"voice_id": "chongqingxiaohuo_speech02", "voice_name": "重庆小伙"},
+        {"voice_id": "chaoshandashu_speech02", "voice_name": "潮汕大叔"},
+        {"voice_id": "ai_taiwan_man2_speech02", "voice_name": "台湾男生"},
+        {"voice_id": "xianzhanggui_speech02", "voice_name": "西安掌柜"},
+        {"voice_id": "daopianyansang-v1", "voice_name": "刀片烟嗓"},
+    ]
+    return {"code": 200, "data": official_voices}
 
 @app.post("/omni/generate/background")
 async def generate_omni_background(
