@@ -1017,9 +1017,17 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         # ===== 第2步：Omni 生成哑剧视频（TTS通过后才做，避免浪费） =====
         logger.info(f"🎬 [第2步/3] 开始调用可灵 Omni 生成视频...")
         
-        omni_prompt = prompt if prompt else "人物正对镜头，面部清晰可见，自然说话"
-        if "正脸" not in omni_prompt and "面向镜头" not in omni_prompt and "正面" not in omni_prompt:
-            omni_prompt += "，人物正对镜头，面部清晰可见"
+        omni_prompt = prompt if prompt else ""
+        
+        # 只在用户写了提示词、且没写"视频开始"时，加上前缀，确保动作从第一帧开始
+        if omni_prompt and "视频开始" not in omni_prompt and "一开始" not in omni_prompt:
+            omni_prompt = "视频开始时，" + omni_prompt
+        
+        # 如果用户完全没写提示词，就用一个中性的默认值
+        if not omni_prompt:
+            omni_prompt = "人物自然微动"
+        
+        logger.info(f"   → 优化后提示词: {omni_prompt}")
         
         omni_payload = {
             "contents": [
@@ -1114,7 +1122,6 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             "-i", audio_tmp.name,
             "-c:v", "copy",
             "-c:a", "aac",
-            "-shortest",
             output_tmp.name
         ]
         logger.info(f"   → 执行 FFmpeg 合并...")
