@@ -1013,13 +1013,15 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             "voice_language": "zh",
             "voice_speed": 1.0
         }
+        logger.info(f"   → TTS请求参数: text={text}, voice_id={voice_id}")
+        
         tts_resp = requests.post(
             "https://api-beijing.klingai.com/v1/audio/tts",
             json=tts_payload, headers=headers,
             timeout=30
         )
         tts_result = tts_resp.json()
-        logger.info(f"   → 可灵 TTS 响应: code={tts_result.get('code')}, message={tts_result.get('message')}")
+        logger.info(f"   → 可灵 TTS 完整响应: {tts_result}")
         
         if tts_result.get("code") != 0:
             error_msg = tts_result.get('message', '')
@@ -1031,38 +1033,49 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         tts_data = tts_result.get("data", {})
         audios = tts_data.get("task_result", {}).get("audios", [])
         
-        # 如果直接取不到，再用 task_id 查询
+        # 如果直接取不到，用统一任务接口查询
         if not audios:
             tts_task_id = tts_data.get("task_id")
             if not tts_task_id:
                 logger.error(f"TTS响应异常: {tts_result}")
                 raise Exception("TTS未返回任务ID")
             
-            logger.info(f"   → 直接取不到音频，用task_id查询: {tts_task_id}")
+            logger.info(f"   → 直接取不到音频，用统一任务接口查询: {tts_task_id}")
             for i in range(30):
                 time.sleep(3)
                 query_resp = requests.get(
-                    f"https://api-beijing.klingai.com/v1/audio/tts/{tts_task_id}",
+                    f"https://api-beijing.klingai.com/tasks?task_ids={tts_task_id}",
                     headers=headers
                 )
                 query_json = query_resp.json()
                 logger.info(f"   → TTS查询 {i+1}/30: {query_json}")
                 
-                query_data = query_json.get("data", {})
-                status = query_data.get("task_status") or query_data.get("status")
-                
-                if status == "succeed":
-                    audios = query_data.get("task_result", {}).get("audios", [])
-                    break
-                elif status == "failed":
-                    raise Exception(f"TTS失败: {query_data.get('task_status_msg', '未知')}")
+                data_list = query_json.get("data", [])
+                if data_list:
+                    item = data_list[0]
+                    status = item.get("status")
+                    if status == "succeeded":
+                        for output in item.get("outputs", []):
+                            if output.get("type") == "audio":
+                                audios = [output]
+                                break
+                        break
+                    elif status == "failed":
+                        raise Exception(f"TTS失败: {item.get('message', '未知')}")
             
             if not audios:
                 raise Exception("TTS音频生成超时")
         
-        audio_id = audios[0]["id"]
-        audio_url = audios[0].get("url")
-        audio_duration = audios[0].get("duration")
+        # 解析音频信息（兼容不同字段）
+        audio_item = audios[0]
+        audio_id = audio_item.get("id")
+        audio_url = audio_item.get("url") or audio_item.get("mp3_url")
+        audio_duration = audio_item.get("duration") or audio_item.get("mp3_duration")
+        
+        if not audio_url:
+            logger.error(f"TTS音频无URL: {audio_item}")
+            raise Exception("TTS音频无URL")
+        
         logger.info(f"✅ [第2步/3] TTS生成成功")
         logger.info(f"   音频ID: {audio_id}")
         logger.info(f"   音频时长: {audio_duration}秒")
