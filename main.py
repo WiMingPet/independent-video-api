@@ -1005,67 +1005,60 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         audio_id = audios[0]["id"]
         logger.info(f"任务 {task_id}: TTS成功 audio_id={audio_id}, 音频URL={audios[0].get('url')}")
         
-        # ===== 第3步：人脸识别 =====
-        logger.info(f"任务 {task_id}: 第3步 人脸识别")
-        face_payload = {"video_url": omni_video_url}
-        face_resp = requests.post(
-            "https://api-beijing.klingai.com/v1/videos/identify-face",
-            json=face_payload, headers=headers
-        )
-        face_result = face_resp.json()
-        if face_result.get("code") != 0:
-            raise Exception(f"人脸识别失败: {face_result.get('message')}")
+        # ===== 第3步：FFmpeg 合并视频和音频 =====
+        logger.info(f"任务 {task_id}: 第3步 FFmpeg合并视频和音频")
         
-        session_id = face_result["data"]["session_id"]
-        # 人脸识别返回的字段是 face_data，不是 face_choose
-        face_data = face_result["data"].get("face_data", [])
-        if not face_data:
-            raise Exception("未检测到人脸，请更换人物照片")
-        face_id = face_data[0]["face_id"]
-        logger.info(f"任务 {task_id}: 人脸识别响应: {face_result}")
+        import subprocess
+        import tempfile
+        import shutil
         
-        # ===== 第4步：对口型 =====
-        logger.info(f"任务 {task_id}: 第4步 对口型")
-        lip_payload = {
-            "session_id": session_id,
-            "face_choose": [{
-                "face_id": face_id,
-                "audio_id": audio_id,
-                "sound_start_time": 0,
-                "sound_end_time": duration * 1000,
-                "sound_insert_time": 0,
-                "sound_volume": 1.0,
-                "original_audio_volume": 1.0
-            }],
-            "external_task_id": task_id
-        }
-        lip_resp = requests.post(
-            "https://api-beijing.klingai.com/v1/videos/advanced-lip-sync",
-            json=lip_payload, headers=headers
-        )
-        lip_result = lip_resp.json()
-        if lip_result.get("code") != 0:
-            raise Exception(f"对口型失败: {lip_result.get('message')}")
+        # 下载 Omni 视频
+        video_tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        video_tmp.close()
+        video_resp = requests.get(omni_video_url, timeout=120)
+        with open(video_tmp.name, "wb") as f:
+            f.write(video_resp.content)
         
-        lip_task_id = lip_result["data"]["task_id"]
-        final_video_url = None
+        # 下载 TTS 音频
+        audio_tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        audio_tmp.close()
+        audio_url = audios[0].get("url")
+        audio_resp = requests.get(audio_url, timeout=60)
+        with open(audio_tmp.name, "wb") as f:
+            f.write(audio_resp.content)
         
-        for i in range(60):
-            time.sleep(5)
-            lip_status = requests.get(
-                f"https://api-beijing.klingai.com/v1/videos/advanced-lip-sync/{lip_task_id}",
-                headers=headers
-            ).json()
-            if lip_status.get("data", {}).get("task_status") == "succeed":
-                videos = lip_status["data"]["task_result"]["videos"]
-                if videos:
-                    final_video_url = videos[0]["url"]
-                break
-            elif lip_status.get("data", {}).get("task_status") == "failed":
-                raise Exception("对口型失败")
+        # 用 FFmpeg 合并
+        output_tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        output_tmp.close()
         
-        if not final_video_url:
-            raise Exception("对口型超时")
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-i", video_tmp.name,
+            "-i", audio_tmp.name,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-shortest",
+            output_tmp.name
+        ]
+        
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.error(f"FFmpeg错误: {result.stderr}")
+            raise Exception("视频音频合并失败")
+        
+        # 上传合并后的视频到你的 /uploads 目录
+        merged_filename = f"omni_merged_{phone}_{task_id[:8]}.mp4"
+        merged_path = os.path.join(UPLOAD_DIR, merged_filename)
+        shutil.move(output_tmp.name, merged_path)
+        
+        # 清理临时文件
+        try:
+            os.unlink(video_tmp.name)
+            os.unlink(audio_tmp.name)
+        except:
+            pass
+        
+        final_video_url = f"https://video-api.lingjing-media.com/uploads/{merged_filename}"
         
         history = History(phone=phone, video_url=final_video_url, type="video")
         db.add(history)
@@ -1073,7 +1066,7 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         task.status = "completed"
         db.commit()
         
-        logger.info(f"✅ 任务 {task_id}: Omni+对口型完成 {final_video_url}")
+        logger.info(f"✅ 任务 {task_id}: Omni+合并完成 {final_video_url}")
         
     except Exception as e:
         logger.error(f"❌ 任务 {task_id} 失败: {str(e)}")
