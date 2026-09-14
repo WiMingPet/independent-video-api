@@ -811,20 +811,7 @@ def get_pending_tasks(phone: str, db: Session = Depends(get_db)):
 # ========== 获取音色列表 ==========
 @app.get("/voices")
 def get_voices():
-    """获取音色列表（官方预置 + 自定义）"""
-    official_voices = [
-        {"voice_id": "zhinen_xuesheng", "voice_name": "智能学生"},
-        {"voice_id": "dongbeilaotie_speech02", "voice_name": "东北老铁"},
-        {"voice_id": "chuanmeizi_speech02", "voice_name": "川妹子"},
-        {"voice_id": "chongqingxiaohuo_speech02", "voice_name": "重庆小伙"},
-        {"voice_id": "chaoshandashu_speech02", "voice_name": "潮汕大叔"},
-        {"voice_id": "tianjinjiejie_speech02", "voice_name": "天津姐姐"},
-        {"voice_id": "ai_taiwan_man2_speech02", "voice_name": "台湾男声"},
-        {"voice_id": "xianzhanggui_speech02", "voice_name": "西安掌柜"},
-        {"voice_id": "oversea_male1", "voice_name": "海外男声"},
-    ]
-    
-    custom_voices = []
+    """获取账户下可用的音色列表"""
     try:
         headers = {"Authorization": f"Bearer {config.KLING_API_KEY}"}
         resp = requests.get(
@@ -832,17 +819,20 @@ def get_voices():
             headers=headers
         )
         data = resp.json()
+        
+        voices = []
         for item in data.get("data", []):
             for voice in item.get("task_result", {}).get("voices", []):
-                custom_voices.append({
+                voices.append({
                     "voice_id": voice.get("voice_id"),
-                    "voice_name": voice.get("voice_name") + "（自定义）"
+                    "voice_name": voice.get("voice_name")
                 })
+        
+        logger.info(f"获取到 {len(voices)} 个音色")
+        return {"code": 200, "data": voices}
     except Exception as e:
-        logger.error(f"获取自定义音色失败: {str(e)}")
-    
-    all_voices = official_voices + custom_voices
-    return {"code": 200, "data": all_voices}
+        logger.error(f"获取音色失败: {str(e)}")
+        return {"code": 500, "message": str(e)}
 
 @app.post("/omni/generate/background")
 async def generate_omni_background(
@@ -850,7 +840,7 @@ async def generate_omni_background(
     prompt: str = Form(""),
     text: str = Form(""),
     duration: int = Form(5),
-    voice_id: str = Form("zhinen_xuesheng"),
+    voice_id: str = Form(""),
     phone: str = Form(...),
     db: Session = Depends(get_db)
 ):
@@ -860,6 +850,9 @@ async def generate_omni_background(
     if not user:
         raise HTTPException(404, "用户不存在")
     
+    if not voice_id:
+        raise HTTPException(400, "请选择音色")
+
     cost_map = {5: 70, 10: 140, 15: 210}
     cost = cost_map.get(duration, 70)
     
@@ -906,17 +899,23 @@ async def generate_omni_background(
 
 
 def process_omni_in_background(task_id, phone, image_data, prompt, text, duration, voice_id, cost):
-    """后台处理 Omni + 对口型 + TTS 组合"""
+    """后台处理 Omni + TTS + FFmpeg 合并"""
     from database import SessionLocal
     db = SessionLocal()
     
-    logger.info(f"🎬 Omni任务开始: {task_id}")
+    logger.info(f"🎬 ========== Omni任务开始 ==========")
+    logger.info(f"   任务ID: {task_id}")
+    logger.info(f"   手机号: {phone}")
+    logger.info(f"   时长: {duration}秒")
+    logger.info(f"   音色: {voice_id}")
+    logger.info(f"   提示词: {prompt[:50] if prompt else '无'}")
+    logger.info(f"   台词: {text[:50] if text else '无'}")
     
     try:
         task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
         task.status = "processing"
         db.commit()
-        logger.info(f"   手机号: {phone}, 提示词: {prompt[:50]}, 台词: {text[:30]}, 时长: {duration}s, 音色: {voice_id}")
+        logger.info(f"   任务状态已更新为 processing")
         
         import base64
         image_b64 = base64.b64encode(image_data).decode()
@@ -925,18 +924,23 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         upload_path = os.path.join(UPLOAD_DIR, upload_filename)
         with open(upload_path, "wb") as f:
             f.write(image_data)
-        logger.info(f"📤 Omni上传图片: {phone}, 文件={upload_filename}")
+        logger.info(f"📤 上传图片已保存: {upload_filename}, 大小={len(image_data)} bytes")
         
         headers = {
             "Authorization": f"Bearer {config.KLING_API_KEY}",
             "Content-Type": "application/json"
         }
         
-        # ===== 第1步：Omni 生成哑剧视频 =====
-        logger.info(f"任务 {task_id}: 第1步 Omni生成哑剧视频")
+        # ========== 第1步：Omni 生成哑剧视频 ==========
+        logger.info(f"🎬 [第1步/3] 开始调用可灵 Omni 生成视频...")
+        
+        omni_prompt = prompt if prompt else "人物正对镜头，面部清晰可见，自然说话"
+        if "正脸" not in omni_prompt and "面向镜头" not in omni_prompt and "正面" not in omni_prompt:
+            omni_prompt += "，人物正对镜头，面部清晰可见"
+        
         omni_payload = {
             "contents": [
-                {"type": "prompt", "text": prompt if prompt else "人物自然说话"},
+                {"type": "prompt", "text": omni_prompt},
                 {"type": "first_frame", "url": f"data:image/jpeg;base64,{image_b64}"}
             ],
             "settings": {
@@ -948,15 +952,23 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             "options": {"external_task_id": task_id}
         }
         
+        logger.info(f"   → 提交 Omni 请求到可灵...")
         resp = requests.post(
             "https://api-beijing.klingai.com/omni-video/kling-3.0-omni",
-            json=omni_payload, headers=headers
+            json=omni_payload, headers=headers,
+            timeout=30
         )
         omni_result = resp.json()
+        logger.info(f"   → 可灵 Omni 响应: code={omni_result.get('code')}, message={omni_result.get('message')}")
+        
         if omni_result.get("code") != 0:
-            raise Exception(f"Omni失败: {omni_result.get('message')}")
+            error_msg = omni_result.get('message', '')
+            if 'risk control' in error_msg.lower():
+                raise Exception("提示词或图片未通过安全审核，请修改后重试")
+            raise Exception(f"Omni失败: {error_msg}")
         
         omni_task_id = omni_result["data"]["id"]
+        logger.info(f"   → Omni 任务ID: {omni_task_id}，开始轮询...")
         omni_video_url = None
         
         for i in range(60):
@@ -967,65 +979,85 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             )
             data_list = status_resp.json().get("data", [])
             if not data_list:
+                logger.info(f"   → 轮询 {i+1}/60: 暂无数据")
                 continue
             task_info = data_list[0]
-            if task_info.get("status") == "succeeded":
+            status = task_info.get("status")
+            logger.info(f"   → 轮询 {i+1}/60: 状态={status}")
+            
+            if status == "succeeded":
                 for output in task_info.get("outputs", []):
                     if output.get("type") == "video":
                         omni_video_url = output.get("url")
                         break
                 break
-            elif task_info.get("status") == "failed":
+            elif status == "failed":
                 raise Exception(f"Omni失败: {task_info.get('message')}")
         
         if not omni_video_url:
             raise Exception("Omni超时")
-        logger.info(f"任务 {task_id}: Omni视频成功")
-        logger.info(f"   Omni视频URL: {omni_video_url}")
+        logger.info(f"✅ [第1步/3] Omni视频生成成功")
+        logger.info(f"   视频URL: {omni_video_url[:80]}...")
         
-        # ===== 第2步：TTS 生成音频 =====
-        logger.info(f"任务 {task_id}: 第2步 TTS生成音频")
+        # ========== 第2步：TTS 生成音频 ==========
+        logger.info(f"🎙️ [第2步/3] 开始调用可灵 TTS 生成语音...")
+        
         tts_payload = {
             "text": text,
             "voice_id": voice_id,
             "voice_language": "zh",
             "voice_speed": 1.0
         }
+        logger.info(f"   → 提交 TTS 请求: 文本长度={len(text)}字, 音色={voice_id}")
         tts_resp = requests.post(
             "https://api-beijing.klingai.com/v1/audio/tts",
-            json=tts_payload, headers=headers
+            json=tts_payload, headers=headers,
+            timeout=30
         )
         tts_result = tts_resp.json()
+        logger.info(f"   → 可灵 TTS 响应: code={tts_result.get('code')}, message={tts_result.get('message')}")
+        
         if tts_result.get("code") != 0:
-            raise Exception(f"TTS失败: {tts_result.get('message')}")
+            error_msg = tts_result.get('message', '')
+            if 'risk control' in error_msg.lower():
+                raise Exception("台词内容未通过安全审核，请修改后重试")
+            raise Exception(f"TTS失败: {error_msg}")
         
         audios = tts_result["data"]["task_result"]["audios"]
         if not audios:
             raise Exception("TTS未返回音频")
         audio_id = audios[0]["id"]
-        logger.info(f"任务 {task_id}: TTS成功 audio_id={audio_id}, 音频URL={audios[0].get('url')}")
+        audio_url = audios[0].get("url")
+        audio_duration = audios[0].get("duration")
+        logger.info(f"✅ [第2步/3] TTS生成成功")
+        logger.info(f"   音频ID: {audio_id}")
+        logger.info(f"   音频时长: {audio_duration}秒")
+        logger.info(f"   音频URL: {audio_url[:80]}...")
         
-        # ===== 第3步：FFmpeg 合并视频和音频 =====
-        logger.info(f"任务 {task_id}: 第3步 FFmpeg合并视频和音频")
+        # ========== 第3步：FFmpeg 合并 ==========
+        logger.info(f"🎞️ [第3步/3] 开始用 FFmpeg 合并视频和音频...")
         
         import subprocess
         import tempfile
         import shutil
         
         # 下载 Omni 视频
+        logger.info(f"   → 下载 Omni 视频...")
         video_tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
         video_tmp.close()
         video_resp = requests.get(omni_video_url, timeout=120)
         with open(video_tmp.name, "wb") as f:
             f.write(video_resp.content)
+        logger.info(f"   → 视频下载完成: {len(video_resp.content)} bytes")
         
         # 下载 TTS 音频
+        logger.info(f"   → 下载 TTS 音频...")
         audio_tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
         audio_tmp.close()
-        audio_url = audios[0].get("url")
         audio_resp = requests.get(audio_url, timeout=60)
         with open(audio_tmp.name, "wb") as f:
             f.write(audio_resp.content)
+        logger.info(f"   → 音频下载完成: {len(audio_resp.content)} bytes")
         
         # 用 FFmpeg 合并
         output_tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
@@ -1040,16 +1072,19 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             "-shortest",
             output_tmp.name
         ]
+        logger.info(f"   → 执行 FFmpeg 合并...")
         
         result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
-            logger.error(f"FFmpeg错误: {result.stderr}")
+            logger.error(f"   → FFmpeg错误: {result.stderr}")
             raise Exception("视频音频合并失败")
+        logger.info(f"   → FFmpeg 合并完成")
         
-        # 上传合并后的视频到你的 /uploads 目录
+        # 上传合并后的视频
         merged_filename = f"omni_merged_{phone}_{task_id[:8]}.mp4"
         merged_path = os.path.join(UPLOAD_DIR, merged_filename)
         shutil.move(output_tmp.name, merged_path)
+        logger.info(f"   → 合并后视频已保存: {merged_filename}")
         
         # 清理临时文件
         try:
@@ -1066,10 +1101,16 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         task.status = "completed"
         db.commit()
         
-        logger.info(f"✅ 任务 {task_id}: Omni+合并完成 {final_video_url}")
+        logger.info(f"✅ [第3步/3] 合并完成")
+        logger.info(f"🎉 ========== Omni任务成功 ==========")
+        logger.info(f"   最终视频URL: {final_video_url}")
         
     except Exception as e:
-        logger.error(f"❌ 任务 {task_id} 失败: {str(e)}")
+        logger.error(f"❌ ========== Omni任务失败 ==========")
+        logger.error(f"   任务ID: {task_id}")
+        logger.error(f"   错误: {str(e)}")
+        logger.error(traceback.format_exc())
+        
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
@@ -1078,7 +1119,7 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         if user:
             user.credits += cost
             db.commit()
-            logger.info(f"任务 {task_id}: 已退款 {cost} 点")
+            logger.info(f"💰 任务 {task_id}: 已退款 {cost} 点给 {phone}")
     finally:
         db.close()
 
