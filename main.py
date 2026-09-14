@@ -913,8 +913,8 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
     logger.info(f"   手机号: {phone}")
     logger.info(f"   时长: {duration}秒")
     logger.info(f"   音色: {voice_id}")
-    logger.info(f"   提示词: {prompt[:50] if prompt else '无'}")
-    logger.info(f"   台词: {text[:50] if text else '无'}")
+    logger.info(f"   提示词(完整): {prompt if prompt else '无'}")
+    logger.info(f"   台词(完整): {text if text else '无'}")
     
     try:
         task = db.query(VideoTask).filter(VideoTask.task_id == task_id).first()
@@ -936,8 +936,86 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             "Content-Type": "application/json"
         }
         
-        # ========== 第1步：Omni 生成哑剧视频 ==========
-        logger.info(f"🎬 [第1步/3] 开始调用可灵 Omni 生成视频...")
+        # ===== 第1步：TTS 生成音频（先做，成本低，用于检查台词合规） =====
+        logger.info(f"🎙️ [第1步/3] 开始调用可灵 TTS 生成语音...")
+        
+        tts_payload = {
+            "text": text,
+            "voice_id": voice_id,
+            "voice_language": "zh",
+            "voice_speed": 1.0
+        }
+        logger.info(f"   → TTS请求参数: text={text[:30]}, voice_id={voice_id}")
+        
+        tts_resp = requests.post(
+            "https://api-beijing.klingai.com/v1/audio/tts",
+            json=tts_payload, headers=headers,
+            timeout=30
+        )
+        tts_result = tts_resp.json()
+        
+        if tts_result.get("code") != 0:
+            error_msg = tts_result.get('message', '')
+            if 'risk control' in error_msg.lower():
+                raise Exception("台词内容未通过安全审核，请修改后重试")
+            raise Exception(f"TTS失败: {error_msg}")
+        
+        tts_data = tts_result.get("data", {})
+        task_status = tts_data.get("task_status")
+        task_status_msg = tts_data.get("task_status_msg", "")
+        
+        if task_status == "failed":
+            if 'risk control' in task_status_msg.lower():
+                raise Exception("台词内容未通过安全审核，请修改后重试")
+            raise Exception(f"TTS失败: {task_status_msg}")
+        
+        audios = tts_data.get("task_result", {}).get("audios", [])
+        
+        if not audios:
+            tts_task_id = tts_data.get("task_id")
+            if not tts_task_id:
+                raise Exception("TTS未返回任务ID")
+            
+            logger.info(f"   → 轮询TTS任务: {tts_task_id}")
+            for i in range(30):
+                time.sleep(3)
+                query_resp = requests.get(
+                    f"https://api-beijing.klingai.com/tasks?task_ids={tts_task_id}",
+                    headers=headers
+                )
+                query_json = query_resp.json()
+                data_list = query_json.get("data", [])
+                if data_list:
+                    item = data_list[0]
+                    status = item.get("status")
+                    if status == "succeeded":
+                        for output in item.get("outputs", []):
+                            if output.get("type") == "audio":
+                                audios = [output]
+                                break
+                        break
+                    elif status == "failed":
+                        msg = item.get("message", "")
+                        if 'risk control' in msg.lower():
+                            raise Exception("台词内容未通过安全审核，请修改后重试")
+                        raise Exception(f"TTS失败: {msg}")
+            
+            if not audios:
+                raise Exception("TTS音频生成超时")
+        
+        audio_item = audios[0]
+        audio_id = audio_item.get("id")
+        audio_url = audio_item.get("url") or audio_item.get("mp3_url")
+        audio_duration = audio_item.get("duration") or audio_item.get("mp3_duration")
+        
+        if not audio_url:
+            raise Exception("TTS音频无URL")
+        
+        logger.info(f"✅ [第1步/3] TTS成功, 音频时长={audio_duration}秒")
+        logger.info(f"   音频URL(完整): {audio_url}")
+        
+        # ===== 第2步：Omni 生成哑剧视频（TTS通过后才做，避免浪费） =====
+        logger.info(f"🎬 [第2步/3] 开始调用可灵 Omni 生成视频...")
         
         omni_prompt = prompt if prompt else "人物正对镜头，面部清晰可见，自然说话"
         if "正脸" not in omni_prompt and "面向镜头" not in omni_prompt and "正面" not in omni_prompt:
@@ -957,14 +1035,13 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             "options": {"external_task_id": task_id}
         }
         
-        logger.info(f"   → 提交 Omni 请求到可灵...")
         resp = requests.post(
             "https://api-beijing.klingai.com/omni-video/kling-3.0-omni",
             json=omni_payload, headers=headers,
             timeout=30
         )
         omni_result = resp.json()
-        logger.info(f"   → 可灵 Omni 响应: code={omni_result.get('code')}, message={omni_result.get('message')}")
+        logger.info(f"   → 可灵Omni完整响应: {omni_result}")
         
         if omni_result.get("code") != 0:
             error_msg = omni_result.get('message', '')
@@ -973,7 +1050,6 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             raise Exception(f"Omni失败: {error_msg}")
         
         omni_task_id = omni_result["data"]["id"]
-        logger.info(f"   → Omni 任务ID: {omni_task_id}，开始轮询...")
         omni_video_url = None
         
         for i in range(60):
@@ -984,11 +1060,10 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
             )
             data_list = status_resp.json().get("data", [])
             if not data_list:
-                logger.info(f"   → 轮询 {i+1}/60: 暂无数据")
                 continue
             task_info = data_list[0]
             status = task_info.get("status")
-            logger.info(f"   → 轮询 {i+1}/60: 状态={status}")
+            logger.info(f"   → Omni轮询 {i+1}/60: 状态={status}")
             
             if status == "succeeded":
                 for output in task_info.get("outputs", []):
@@ -1001,85 +1076,8 @@ def process_omni_in_background(task_id, phone, image_data, prompt, text, duratio
         
         if not omni_video_url:
             raise Exception("Omni超时")
-        logger.info(f"✅ [第1步/3] Omni视频生成成功")
-        logger.info(f"   视频URL: {omni_video_url[:80]}...")
-        
-        # ===== 第2步：TTS 生成音频 =====
-        logger.info(f"🎙️ [第2步/3] 开始调用可灵 TTS 生成语音...")
-        
-        tts_payload = {
-            "text": text,
-            "voice_id": voice_id,
-            "voice_language": "zh",
-            "voice_speed": 1.0
-        }
-        logger.info(f"   → TTS请求参数: text={text}, voice_id={voice_id}")
-        
-        tts_resp = requests.post(
-            "https://api-beijing.klingai.com/v1/audio/tts",
-            json=tts_payload, headers=headers,
-            timeout=30
-        )
-        tts_result = tts_resp.json()
-        logger.info(f"   → 可灵 TTS 完整响应: {tts_result}")
-        
-        if tts_result.get("code") != 0:
-            error_msg = tts_result.get('message', '')
-            if 'risk control' in error_msg.lower():
-                raise Exception("台词内容未通过安全审核，请修改后重试")
-            raise Exception(f"TTS失败: {error_msg}")
-        
-        # 先尝试直接从响应取
-        tts_data = tts_result.get("data", {})
-        audios = tts_data.get("task_result", {}).get("audios", [])
-        
-        # 如果直接取不到，用统一任务接口查询
-        if not audios:
-            tts_task_id = tts_data.get("task_id")
-            if not tts_task_id:
-                logger.error(f"TTS响应异常: {tts_result}")
-                raise Exception("TTS未返回任务ID")
-            
-            logger.info(f"   → 直接取不到音频，用统一任务接口查询: {tts_task_id}")
-            for i in range(30):
-                time.sleep(3)
-                query_resp = requests.get(
-                    f"https://api-beijing.klingai.com/tasks?task_ids={tts_task_id}",
-                    headers=headers
-                )
-                query_json = query_resp.json()
-                logger.info(f"   → TTS查询 {i+1}/30: {query_json}")
-                
-                data_list = query_json.get("data", [])
-                if data_list:
-                    item = data_list[0]
-                    status = item.get("status")
-                    if status == "succeeded":
-                        for output in item.get("outputs", []):
-                            if output.get("type") == "audio":
-                                audios = [output]
-                                break
-                        break
-                    elif status == "failed":
-                        raise Exception(f"TTS失败: {item.get('message', '未知')}")
-            
-            if not audios:
-                raise Exception("TTS音频生成超时")
-        
-        # 解析音频信息（兼容不同字段）
-        audio_item = audios[0]
-        audio_id = audio_item.get("id")
-        audio_url = audio_item.get("url") or audio_item.get("mp3_url")
-        audio_duration = audio_item.get("duration") or audio_item.get("mp3_duration")
-        
-        if not audio_url:
-            logger.error(f"TTS音频无URL: {audio_item}")
-            raise Exception("TTS音频无URL")
-        
-        logger.info(f"✅ [第2步/3] TTS生成成功")
-        logger.info(f"   音频ID: {audio_id}")
-        logger.info(f"   音频时长: {audio_duration}秒")
-        logger.info(f"   音频URL: {audio_url[:80]}...")
+        logger.info(f"✅ [第2步/3] Omni视频生成成功")
+        logger.info(f"   视频URL(完整): {omni_video_url}")
         
         # ========== 第3步：FFmpeg 合并 ==========
         logger.info(f"🎞️ [第3步/3] 开始用 FFmpeg 合并视频和音频...")
