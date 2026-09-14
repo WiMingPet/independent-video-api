@@ -808,6 +808,42 @@ def get_pending_tasks(phone: str, db: Session = Depends(get_db)):
     
     return {"code": 200, "data": result}
 
+# ========== 获取音色列表 ==========
+@app.get("/voices")
+def get_voices():
+    """获取音色列表（官方预置 + 自定义）"""
+    official_voices = [
+        {"voice_id": "zhinen_xuesheng", "voice_name": "智能学生"},
+        {"voice_id": "dongbeilaotie_speech02", "voice_name": "东北老铁"},
+        {"voice_id": "chuanmeizi_speech02", "voice_name": "川妹子"},
+        {"voice_id": "chongqingxiaohuo_speech02", "voice_name": "重庆小伙"},
+        {"voice_id": "chaoshandashu_speech02", "voice_name": "潮汕大叔"},
+        {"voice_id": "tianjinjiejie_speech02", "voice_name": "天津姐姐"},
+        {"voice_id": "ai_taiwan_man2_speech02", "voice_name": "台湾男声"},
+        {"voice_id": "xianzhanggui_speech02", "voice_name": "西安掌柜"},
+        {"voice_id": "oversea_male1", "voice_name": "海外男声"},
+    ]
+    
+    custom_voices = []
+    try:
+        headers = {"Authorization": f"Bearer {config.KLING_API_KEY}"}
+        resp = requests.get(
+            "https://api-beijing.klingai.com/v1/general/presets-voices?pageNum=1&pageSize=100",
+            headers=headers
+        )
+        data = resp.json()
+        for item in data.get("data", []):
+            for voice in item.get("task_result", {}).get("voices", []):
+                custom_voices.append({
+                    "voice_id": voice.get("voice_id"),
+                    "voice_name": voice.get("voice_name") + "（自定义）"
+                })
+    except Exception as e:
+        logger.error(f"获取自定义音色失败: {str(e)}")
+    
+    all_voices = official_voices + custom_voices
+    return {"code": 200, "data": all_voices}
+
 @app.post("/omni/generate/background")
 async def generate_omni_background(
     image: UploadFile = File(...),
